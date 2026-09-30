@@ -59,10 +59,13 @@ jobs:
           EOF
 
           cat > gradle.properties << 'EOF' | sed 's/^  //'
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           kotlin.code.style=official
           android.nonTransitiveRClass=true
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.configuration-cache=true
           EOF
 
           cat > app/build.gradle.kts << 'EOF' | sed 's/^  //'
@@ -80,13 +83,30 @@ jobs:
                   applicationId = "com.example.filemanagermd3"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 6
-                  versionName = "1.5"
+                  versionCode = 7
+                  versionName = "2.0"
+              }
+
+              signingConfigs {
+                  getByName("debug") {
+                      // 使用 AGP 自动生成的 debug keystore
+                  }
               }
 
               buildTypes {
-                  release {
+                  debug {
+                      isDebuggable = false
                       isMinifyEnabled = false
+                  }
+                  release {
+                      isDebuggable = false
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      proguardFiles(
+                          getDefaultProguardFile("proguard-android-optimize.txt"),
+                          "proguard-rules.pro"
+                      )
+                      signingConfig = signingConfigs.getByName("debug")
                   }
               }
               compileOptions {
@@ -100,7 +120,15 @@ jobs:
           kotlin {
               compilerOptions {
                   jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+                  freeCompilerArgs.addAll(
+                      "-Xjvm-default=all",
+                      "-opt-in=kotlin.RequiresOptIn"
+                  )
               }
+          }
+
+          composeCompiler {
+              enableStrongSkippingMode = true
           }
 
           dependencies {
@@ -112,6 +140,14 @@ jobs:
               implementation("androidx.compose.material3:material3")
               implementation("androidx.compose.material:material-icons-extended")
           }
+          EOF
+
+          cat > app/proguard-rules.pro << 'EOF' | sed 's/^  //'
+          -keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
+          -keep class androidx.compose.runtime.** { *; }
+          -keep class androidx.compose.ui.** { *; }
+          -keep class androidx.compose.material3.** { *; }
+          -dontwarn androidx.compose.**
           EOF
 
           cat > app/src/main/AndroidManifest.xml << 'EOF' | sed 's/^  //'
@@ -177,6 +213,7 @@ jobs:
                   <item name="android:statusBarColor">@android:color/transparent</item>
                   <item name="android:navigationBarColor">@android:color/transparent</item>
                   <item name="android:windowBackground">#FEF7FF</item>
+                  <item name="android:hardwareAccelerated">true</item>
               </style>
           </resources>
           EOF
@@ -211,6 +248,8 @@ jobs:
           import android.app.Application
           import android.content.Context
           import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
@@ -224,6 +263,7 @@ jobs:
           import androidx.activity.enableEdgeToEdge
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.ExperimentalFoundationApi
+          import androidx.compose.foundation.Image
           import androidx.compose.foundation.background
           import androidx.compose.foundation.clickable
           import androidx.compose.foundation.combinedClickable
@@ -251,6 +291,7 @@ jobs:
           import androidx.compose.foundation.text.BasicTextField
           import androidx.compose.foundation.text.KeyboardActions
           import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.filled.Add
           import androidx.compose.material.icons.filled.ArrowBack
@@ -304,6 +345,7 @@ jobs:
           import androidx.compose.runtime.Composable
           import androidx.compose.runtime.Immutable
           import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.derivedStateOf
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.remember
@@ -313,13 +355,17 @@ jobs:
           import androidx.compose.ui.draw.clip
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.graphics.SolidColor
+          import androidx.compose.ui.graphics.asImageBitmap
           import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.layout.ContentScale
           import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.input.ImeAction
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
           import androidx.core.content.FileProvider
           import androidx.lifecycle.AndroidViewModel
           import androidx.lifecycle.viewModelScope
@@ -335,6 +381,7 @@ jobs:
           import java.time.format.DateTimeFormatter
           import java.util.Locale
           import java.util.concurrent.ConcurrentHashMap
+          import java.util.zip.ZipFile
 
           private val LightColors = lightColorScheme(
               primary = Color(0xFF6750A4),
@@ -489,9 +536,9 @@ jobs:
 
           fun openFileWithSystem(context: Context, item: FileItem) {
               if (item.isDirectory) return
-              val mime = if (item.extension.isNotEmpty()) {
+              val mime = if (item.extension.isNotEmpty())
                   MimeTypeMap.getSingleton().getMimeTypeFromExtension(item.extension)
-              } else null
+              else null
               val type = mime ?: "*/*"
               try {
                   val uri = FileProvider.getUriForFile(
@@ -1170,6 +1217,155 @@ jobs:
               )
           }
 
+          // ============================================================
+          // 内置预览
+          // ============================================================
+          sealed interface PreviewState {
+              data object Loading : PreviewState
+              data class Text(val content: String) : PreviewState
+              data class Image(val bitmap: Bitmap) : PreviewState
+              data class Archive(val entries: List<String>) : PreviewState
+              data class Unsupported(val reason: String) : PreviewState
+          }
+
+          @Composable
+          fun PreviewSheet(item: FileItem, onDismiss: () -> Unit) {
+              val context = LocalContext.current
+              var state by remember(item.path) { mutableStateOf<PreviewState>(PreviewState.Loading) }
+
+              LaunchedEffect(item.path) {
+                  val s = withContext(Dispatchers.IO) {
+                      try {
+                          when (item.kind) {
+                              FileKind.CODE -> {
+                                  if (item.size > 2_000_000L) {
+                                      PreviewState.Text("文件过大（" + humanSize(item.size) + "），不支持内联预览")
+                                  } else {
+                                      PreviewState.Text(item.file.readText())
+                                  }
+                              }
+                              FileKind.IMAGE -> {
+                                  val opts = BitmapFactory.Options().apply {
+                                      inJustDecodeBounds = true
+                                  }
+                                  BitmapFactory.decodeFile(item.path, opts)
+                                  var sample = 1
+                                  while (opts.outWidth / sample > 2048 ||
+                                         opts.outHeight / sample > 2048) {
+                                      sample *= 2
+                                  }
+                                  val decodeOpts = BitmapFactory.Options().apply {
+                                      inSampleSize = sample
+                                  }
+                                  val bmp = BitmapFactory.decodeFile(item.path, decodeOpts)
+                                  if (bmp != null) PreviewState.Image(bmp)
+                                  else PreviewState.Unsupported("无法解码图片")
+                              }
+                              FileKind.ARCHIVE -> {
+                                  if (item.extension != "zip") {
+                                      PreviewState.Unsupported("暂不支持 ." + item.extension + " 压缩包内预览")
+                                  } else {
+                                      val list = ArrayList<String>(64)
+                                      ZipFile(item.file).use { zip ->
+                                          val it = zip.entries()
+                                          while (it.hasMoreElements() && list.size < 500) {
+                                              list.add(it.nextElement().name)
+                                          }
+                                      }
+                                      PreviewState.Archive(list)
+                                  }
+                              }
+                              else -> PreviewState.Unsupported("该格式暂不支持内置预览")
+                          }
+                      } catch (e: Exception) {
+                          PreviewState.Unsupported("读取失败：" + (e.message ?: "未知错误"))
+                      }
+                  }
+                  state = s
+              }
+
+              val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+              ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
+                  containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+                  Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                      Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
+                          Text(item.name, style = MaterialTheme.typography.titleMedium,
+                              maxLines = 2, overflow = TextOverflow.Ellipsis)
+                          Spacer(Modifier.height(2.dp))
+                          Text(item.subtitle, style = MaterialTheme.typography.bodyMedium,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                      Spacer(Modifier.height(8.dp))
+                      when (val s = state) {
+                          PreviewState.Loading -> {
+                              Box(Modifier.fillMaxWidth().height(200.dp),
+                                  contentAlignment = Alignment.Center) {
+                                  Text("加载中...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                              }
+                          }
+                          is PreviewState.Text -> {
+                              Column(
+                                  Modifier.fillMaxWidth().height(520.dp)
+                                      .verticalScroll(rememberScrollState())
+                                      .padding(horizontal = 24.dp)
+                              ) {
+                                  Text(s.content,
+                                      fontFamily = FontFamily.Monospace,
+                                      fontSize = 13.sp,
+                                      lineHeight = 20.sp,
+                                      color = MaterialTheme.colorScheme.onSurface)
+                              }
+                          }
+                          is PreviewState.Image -> {
+                              Box(Modifier.fillMaxWidth().height(520.dp),
+                                  contentAlignment = Alignment.Center) {
+                                  Image(bitmap = s.bitmap.asImageBitmap(),
+                                      contentDescription = item.name,
+                                      modifier = Modifier.fillMaxSize(),
+                                      contentScale = ContentScale.Fit)
+                              }
+                          }
+                          is PreviewState.Archive -> {
+                              Column(
+                                  Modifier.fillMaxWidth().height(520.dp)
+                                      .verticalScroll(rememberScrollState())
+                                      .padding(horizontal = 24.dp)
+                              ) {
+                                  Text("共 " + s.entries.size + " 个条目",
+                                      style = MaterialTheme.typography.labelMedium,
+                                      color = MaterialTheme.colorScheme.primary)
+                                  Spacer(Modifier.height(8.dp))
+                                  s.entries.forEach { name ->
+                                      Text(name,
+                                          fontFamily = FontFamily.Monospace,
+                                          fontSize = 12.sp,
+                                          color = MaterialTheme.colorScheme.onSurface,
+                                          modifier = Modifier.padding(vertical = 3.dp))
+                                  }
+                              }
+                          }
+                          is PreviewState.Unsupported -> {
+                              Column(Modifier.fillMaxWidth().padding(32.dp),
+                                  horizontalAlignment = Alignment.CenterHorizontally) {
+                                  Text(s.reason, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  Spacer(Modifier.height(16.dp))
+                                  Surface(onClick = {
+                                      openFileWithSystem(context, item)
+                                      onDismiss()
+                                  }, shape = RoundedCornerShape(20.dp),
+                                      color = MaterialTheme.colorScheme.primary) {
+                                      Text("用其他应用打开",
+                                          color = MaterialTheme.colorScheme.onPrimary,
+                                          style = MaterialTheme.typography.labelLarge,
+                                          modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp))
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
           private val navItems = listOf(
               NavEntry(Icons.Filled.Folder, "文件"),
               NavEntry(Icons.Filled.Schedule, "最近"),
@@ -1257,6 +1453,7 @@ jobs:
 
               var sheet by remember { mutableStateOf<UiSheet?>(null) }
               var dialog by remember { mutableStateOf<UiDialog?>(null) }
+              var previewItem by remember { mutableStateOf<FileItem?>(null) }
 
               Scaffold(
                   containerColor = MaterialTheme.colorScheme.background,
@@ -1378,24 +1575,39 @@ jobs:
                                               if (vm.searchQuery.isNotBlank()) "试试其他关键词" else "下拉刷新，或点击右下角 + 新建"
                                           )
                                       } else {
-                                          FileList(vm.items, vm.starredPaths, vm::open,
-                                              { item -> sheet = UiSheet.ItemMenu(item) }, vm.gridMode)
+                                          FileList(vm.items, vm.starredPaths,
+                                              onOpen = { item ->
+                                                  if (item.isDirectory) vm.open(item)
+                                                  else previewItem = item
+                                              },
+                                              onMenu = { item -> sheet = UiSheet.ItemMenu(item) },
+                                              grid = vm.gridMode)
                                       }
                                   }
                                   Tab.RECENT -> {
                                       if (vm.recentItems.isEmpty()) {
                                           EmptyStateList("暂无最近文件", "打开过的文件会出现在这里")
                                       } else {
-                                          FileList(vm.recentItems, vm.starredPaths, vm::open,
-                                              { item -> sheet = UiSheet.ItemMenu(item) }, vm.gridMode)
+                                          FileList(vm.recentItems, vm.starredPaths,
+                                              onOpen = { item ->
+                                                  if (item.isDirectory) vm.open(item)
+                                                  else previewItem = item
+                                              },
+                                              onMenu = { item -> sheet = UiSheet.ItemMenu(item) },
+                                              grid = vm.gridMode)
                                       }
                                   }
                                   Tab.STARRED -> {
                                       if (vm.starredItems.isEmpty()) {
                                           EmptyStateList("暂无收藏", "在菜单中点击收藏即可加入")
                                       } else {
-                                          FileList(vm.starredItems, vm.starredPaths, vm::open,
-                                              { item -> sheet = UiSheet.ItemMenu(item) }, vm.gridMode)
+                                          FileList(vm.starredItems, vm.starredPaths,
+                                              onOpen = { item ->
+                                                  if (item.isDirectory) vm.open(item)
+                                                  else previewItem = item
+                                              },
+                                              onMenu = { item -> sheet = UiSheet.ItemMenu(item) },
+                                              grid = vm.gridMode)
                                       }
                                   }
                                   Tab.SETTINGS -> {}
@@ -1415,6 +1627,15 @@ jobs:
                   }
               }
 
+              // 预览
+              val p = previewItem
+              if (p != null) {
+                  PreviewSheet(item = p, onDismiss = {
+                      vm.recordRecent(p)
+                      previewItem = null
+                  })
+              }
+
               when (val s = sheet) {
                   is UiSheet.ItemMenu -> {
                       val item = s.item
@@ -1424,14 +1645,16 @@ jobs:
                           actions = buildList {
                               add(SheetAction(
                                   if (item.isDirectory) Icons.Filled.FolderOpen else Icons.Filled.InsertDriveFile,
-                                  if (item.isDirectory) "打开" else "用其他应用打开") {
-                                  if (item.isDirectory) {
-                                      vm.open(item)
-                                  } else {
+                                  if (item.isDirectory) "打开" else "预览") {
+                                  if (item.isDirectory) vm.open(item)
+                                  else previewItem = item
+                              })
+                              if (!item.isDirectory) {
+                                  add(SheetAction(Icons.Filled.FolderOpen, "用其他应用打开") {
                                       openFileWithSystem(ctx, item)
                                       vm.recordRecent(item)
-                                  }
-                              })
+                                  })
+                              }
                               add(SheetAction(
                                   if (vm.isStarred(item.path)) Icons.Filled.Star else Icons.Filled.StarBorder,
                                   if (vm.isStarred(item.path)) "取消收藏" else "收藏") { vm.toggleStar(item) })
@@ -1576,7 +1799,7 @@ jobs:
                       }
                   }
                   Spacer(Modifier.height(32.dp))
-                  Text("Files - MD3 v1.5 - 智能缓存 + 下拉刷新",
+                  Text("Files - MD3 v2.0 - 内置预览 + Release 优化",
                       style = MaterialTheme.typography.labelSmall,
                       color = MaterialTheme.colorScheme.onSurfaceVariant,
                       modifier = Modifier.fillMaxWidth())
@@ -1596,12 +1819,12 @@ jobs:
           }
           KOTLIN_EOF
 
-      - name: Build APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Build Release APK
+        run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: app-release
+          path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
