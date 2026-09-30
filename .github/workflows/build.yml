@@ -599,9 +599,9 @@ jobs:
 
               fun isStarred(path: String) = starredPaths.contains(path)
 
-              fun setGrid(g: Boolean) { gridMode = g; prefs.edit().putBoolean("grid", g).apply() }
-              fun setSort(k: SortKey) { sortKey = k; prefs.edit().putString("sort", k.name).apply(); refresh() }
-              fun setShowHidden(s: Boolean) { showHidden = s; prefs.edit().putBoolean("hidden", s).apply(); refresh() }
+              fun updateGrid(g: Boolean) { gridMode = g; prefs.edit().putBoolean("grid", g).apply() }
+              fun updateSort(k: SortKey) { sortKey = k; prefs.edit().putString("sort", k.name).apply(); refresh() }
+              fun updateShowHidden(s: Boolean) { showHidden = s; prefs.edit().putBoolean("hidden", s).apply(); refresh() }
 
               fun showSnack(m: String) { snackMessage = m }
               fun consumeSnack() { snackMessage = null }
@@ -1012,7 +1012,7 @@ jobs:
                                               IconButton(onClick = { vm.searchMode = true }) {
                                                   Icon(Icons.Filled.Search, "搜索")
                                               }
-                                              IconButton(onClick = { vm.setGrid(!vm.gridMode) }) {
+                                              IconButton(onClick = { vm.updateGrid(!vm.gridMode) }) {
                                                   Icon(if (vm.gridMode) Icons.Filled.ViewList else Icons.Filled.GridView, "切换视图")
                                               }
                                           }
@@ -1208,14 +1208,14 @@ jobs:
                               style = MaterialTheme.typography.labelMedium,
                               color = MaterialTheme.colorScheme.onSurfaceVariant)
                       }
-                      Switch(checked = vm.showHidden, onCheckedChange = vm::setShowHidden)
+                      Switch(checked = vm.showHidden, onCheckedChange = vm::updateShowHidden)
                   }
                   Spacer(Modifier.height(12.dp))
                   Text("默认视图", style = MaterialTheme.typography.bodyLarge)
                   Spacer(Modifier.height(8.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       listOf("列表" to false, "网格" to true).forEach { (label, v) ->
-                          Surface(onClick = { vm.setGrid(v) },
+                          Surface(onClick = { vm.updateGrid(v) },
                               shape = RoundedCornerShape(20.dp),
                               color = if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
                                       else MaterialTheme.colorScheme.surface,
@@ -1234,7 +1234,7 @@ jobs:
                   Spacer(Modifier.height(8.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       listOf("名称" to SortKey.NAME, "大小" to SortKey.SIZE, "时间" to SortKey.MTIME).forEach { (label, v) ->
-                          Surface(onClick = { vm.setSort(v) },
+                          Surface(onClick = { vm.updateSort(v) },
                               shape = RoundedCornerShape(20.dp),
                               color = if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
                                       else MaterialTheme.colorScheme.surface,
