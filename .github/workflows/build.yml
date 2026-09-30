@@ -82,8 +82,8 @@ jobs:
                   applicationId = "com.example.filemanagermd3"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 12
-                  versionName = "2.5"
+                  versionCode = 15
+                  versionName = "2.8"
               }
 
               buildTypes {
@@ -114,6 +114,7 @@ jobs:
               implementation("androidx.core:core-ktx:1.13.1")
               implementation("androidx.activity:activity-compose:1.9.2")
               implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
               implementation(platform("androidx.compose:compose-bom:2024.09.02"))
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.material3:material3")
@@ -241,7 +242,6 @@ jobs:
           import android.os.Environment
           import android.provider.Settings
           import android.webkit.MimeTypeMap
-          import android.widget.MediaController
           import android.widget.Toast
           import android.widget.VideoView
           import androidx.activity.ComponentActivity
@@ -312,7 +312,6 @@ jobs:
           import androidx.compose.material.icons.filled.Settings
           import androidx.compose.material.icons.filled.Star
           import androidx.compose.material.icons.filled.StarBorder
-          import androidx.compose.material.icons.filled.Stop
           import androidx.compose.material.icons.filled.Storage
           import androidx.compose.material.icons.filled.Terminal
           import androidx.compose.material.icons.filled.TextFields
@@ -325,7 +324,6 @@ jobs:
           import androidx.compose.material3.FloatingActionButton
           import androidx.compose.material3.Icon
           import androidx.compose.material3.IconButton
-          import androidx.compose.material3.LinearProgressIndicator
           import androidx.compose.material3.ListItem
           import androidx.compose.material3.MaterialTheme
           import androidx.compose.material3.ModalBottomSheet
@@ -349,6 +347,7 @@ jobs:
           import androidx.compose.runtime.Immutable
           import androidx.compose.runtime.LaunchedEffect
           import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.key
           import androidx.compose.runtime.mutableIntStateOf
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.remember
@@ -364,6 +363,7 @@ jobs:
           import androidx.compose.ui.layout.ContentScale
           import androidx.compose.ui.platform.LocalClipboardManager
           import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalLifecycleOwner
           import androidx.compose.ui.text.AnnotatedString
           import androidx.compose.ui.text.TextStyle
           import androidx.compose.ui.text.font.FontFamily
@@ -375,6 +375,8 @@ jobs:
           import androidx.compose.ui.viewinterop.AndroidView
           import androidx.core.content.FileProvider
           import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.Lifecycle
+          import androidx.lifecycle.LifecycleEventObserver
           import androidx.lifecycle.viewModelScope
           import androidx.lifecycle.viewmodel.compose.viewModel
           import kotlinx.coroutines.Dispatchers
@@ -453,8 +455,8 @@ jobs:
               "mp3","wav","flac","aac","ogg","m4a","wma","opus","amr","ape",
               "aiff","aif","aifc","mid","midi","ac3","dts","mka","weba","ra","cda","m4b","m4p","oga",
               "mod","s3m","xm","it","kar","sf2","sf3","snd","au","voc","8svx","msv","mmf",
-              "dsf","dff","ape","tak","tta","wv","spx","caf","ec3","eac3","mlp","thd",
-              "aa","aax","m4r","rip","oma","at3","at9","aa3","oma","vqf"
+              "dsf","dff","tak","tta","wv","spx","caf","ec3","eac3","mlp","thd",
+              "aa","aax","m4r","rip","oma","at3","at9","aa3","vqf"
           )
           private val ARCHIVE_EXTS = setOf(
               "zip","rar","7z","tar","gz","bz2","xz","iso","jar",
@@ -648,11 +650,11 @@ jobs:
               try {
                   val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) activity.display
                       else @Suppress("DEPRECATION") activity.windowManager.defaultDisplay
-                  ?: return
+                  if (display == null) return
                   val modes = display.supportedModes ?: return
                   val target = if (enabled) modes.maxByOrNull { it.refreshRate }
                       else modes.minByOrNull { it.refreshRate }
-                  ?: return
+                  if (target == null) return
                   val attrs = activity.window.attributes
                   attrs.preferredDisplayModeId = target.modeId
                   activity.window.attributes = attrs
@@ -994,19 +996,28 @@ jobs:
                   return ok
               }
 
-              fun extractZipEntry(zipFile: File, entryName: String, cacheDir: File): File? = try {
-                  cacheDir.mkdirs()
-                  val baseName = entryName.substringAfterLast('/')
-                  if (baseName.isEmpty()) return null
-                  val outFile = File(cacheDir, baseName)
-                  ZipFile(zipFile).use { zip ->
-                      val entry = zip.getEntry(entryName) ?: return null
-                      zip.getInputStream(entry).use { input ->
-                          outFile.outputStream().use { output -> input.copyTo(output) }
+              fun extractZipEntry(zipFile: File, entryName: String, cacheDir: File): File? {
+                  return try {
+                      cacheDir.mkdirs()
+                      val baseName = entryName.substringAfterLast('/')
+                      if (baseName.isEmpty()) {
+                          null
+                      } else {
+                          val outFile = File(cacheDir, baseName)
+                          var result: File? = null
+                          ZipFile(zipFile).use { zip ->
+                              val entry = zip.getEntry(entryName)
+                              if (entry != null && !entry.isDirectory) {
+                                  zip.getInputStream(entry).use { input ->
+                                      outFile.outputStream().use { output -> input.copyTo(output) }
+                                  }
+                                  result = outFile
+                              }
+                          }
+                          result
                       }
-                  }
-                  outFile
-              } catch (e: Exception) { null }
+                  } catch (e: Exception) { null }
+              }
 
               fun extractZipTo(zipFile: File, targetDir: File): Int {
                   var count = 0
@@ -1019,14 +1030,15 @@ jobs:
                               val entry = entries.nextElement()
                               val outFile = File(targetDir, entry.name)
                               val canon = outFile.canonicalPath
-                              if (canon != basePath && !canon.startsWith(prefix)) continue
-                              if (entry.isDirectory) outFile.mkdirs()
-                              else {
-                                  outFile.parentFile?.mkdirs()
-                                  zip.getInputStream(entry).use { input ->
-                                      outFile.outputStream().use { output -> input.copyTo(output) }
+                              if (canon == basePath || canon.startsWith(prefix)) {
+                                  if (entry.isDirectory) outFile.mkdirs()
+                                  else {
+                                      outFile.parentFile?.mkdirs()
+                                      zip.getInputStream(entry).use { input ->
+                                          outFile.outputStream().use { output -> input.copyTo(output) }
+                                      }
+                                      count++
                                   }
-                                  count++
                               }
                           }
                       }
@@ -1241,21 +1253,29 @@ jobs:
           }
 
           // ============================================================
-          // 媒体播放器
+          // 媒体播放器（含生命周期暂停）
           // ============================================================
           @Composable
           fun VideoPlayerView(path: String) {
+              val lifecycleOwner = LocalLifecycleOwner.current
               var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
               var isPlaying by remember { mutableStateOf(false) }
               var duration by remember { mutableIntStateOf(0) }
               var position by remember { mutableIntStateOf(0) }
 
-              DisposableEffect(path) {
+              DisposableEffect(lifecycleOwner, path) {
+                  val observer = LifecycleEventObserver { _, event ->
+                      if (event == Lifecycle.Event.ON_PAUSE) {
+                          try {
+                              videoViewRef?.let { if (it.isPlaying) { it.pause(); isPlaying = false } }
+                          } catch (_: Exception) {}
+                      }
+                  }
+                  lifecycleOwner.lifecycle.addObserver(observer)
                   onDispose {
+                      lifecycleOwner.lifecycle.removeObserver(observer)
                       try {
-                          videoViewRef?.let {
-                              if (it.isPlaying) it.stopPlayback()
-                          }
+                          videoViewRef?.let { if (it.isPlaying) it.stopPlayback() }
                       } catch (_: Exception) {}
                       videoViewRef = null
                   }
@@ -1263,9 +1283,7 @@ jobs:
 
               LaunchedEffect(isPlaying) {
                   while (isPlaying) {
-                      try {
-                          videoViewRef?.let { position = it.currentPosition }
-                      } catch (_: Exception) {}
+                      try { videoViewRef?.let { position = it.currentPosition } } catch (_: Exception) {}
                       delay(500)
                   }
               }
@@ -1281,13 +1299,10 @@ jobs:
                                   isPlaying = true
                               }
                               setOnCompletionListener { isPlaying = false }
-                              setOnErrorListener { _, _, _ ->
-                                  isPlaying = false
-                                  true
-                              }
-                              videoViewRef = this
+                              setOnErrorListener { _, _, _ -> isPlaying = false; true }
                           }
                       },
+                      update = { view -> videoViewRef = view },
                       modifier = Modifier.fillMaxWidth().height(280.dp).background(Color.Black)
                   )
                   Spacer(Modifier.height(12.dp))
@@ -1304,7 +1319,7 @@ jobs:
                       }
                       Text(text = fmtTime(position), style = MaterialTheme.typography.labelMedium)
                       Slider(
-                          value = if (duration > 0) position.toFloat() / duration else 0f,
+                          value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                           onValueChange = { frac ->
                               val v = videoViewRef ?: return@Slider
                               try { v.seekTo((frac * duration).toInt()) } catch (_: Exception) {}
@@ -1318,27 +1333,44 @@ jobs:
 
           @Composable
           fun AudioPlayerView(path: String) {
+              val lifecycleOwner = LocalLifecycleOwner.current
               var player by remember { mutableStateOf<MediaPlayer?>(null) }
               var isPlaying by remember { mutableStateOf(false) }
               var duration by remember { mutableIntStateOf(0) }
               var position by remember { mutableIntStateOf(0) }
               var error by remember { mutableStateOf<String?>(null) }
 
-              DisposableEffect(path) {
+              DisposableEffect(lifecycleOwner, path) {
                   val mp = MediaPlayer()
                   try {
                       mp.setDataSource(path)
-                      mp.prepare()
-                      duration = mp.duration
+                      mp.setOnPreparedListener { prepared ->
+                          duration = prepared.duration
+                          player = prepared
+                      }
                       mp.setOnCompletionListener { isPlaying = false }
-                      player = mp
+                      mp.setOnErrorListener { _, _, _ -> error = "播放失败"; true }
+                      mp.prepareAsync()
                   } catch (e: Exception) {
                       error = e.message ?: "无法播放"
                       try { mp.release() } catch (_: Exception) {}
                   }
+
+                  val observer = LifecycleEventObserver { _, event ->
+                      if (event == Lifecycle.Event.ON_PAUSE) {
+                          try {
+                              if (mp.isPlaying) { mp.pause(); isPlaying = false }
+                          } catch (_: Exception) {}
+                      }
+                  }
+                  lifecycleOwner.lifecycle.addObserver(observer)
+
                   onDispose {
+                      lifecycleOwner.lifecycle.removeObserver(observer)
                       try {
+                          mp.setOnPreparedListener(null)
                           mp.setOnCompletionListener(null)
+                          mp.setOnErrorListener(null)
                           if (mp.isPlaying) mp.stop()
                           mp.release()
                       } catch (_: Exception) {}
@@ -1348,9 +1380,7 @@ jobs:
 
               LaunchedEffect(isPlaying) {
                   while (isPlaying) {
-                      try {
-                          player?.let { position = it.currentPosition }
-                      } catch (_: Exception) {}
+                      try { player?.let { position = it.currentPosition } } catch (_: Exception) {}
                       delay(500)
                   }
               }
@@ -1382,7 +1412,7 @@ jobs:
                           verticalAlignment = Alignment.CenterVertically) {
                           Text(fmtTime(position), style = MaterialTheme.typography.labelMedium)
                           Slider(
-                              value = if (duration > 0) position.toFloat() / duration else 0f,
+                              value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                               onValueChange = { frac ->
                                   val p = player ?: return@Slider
                                   try { p.seekTo((frac * duration).toInt()) } catch (_: Exception) {}
@@ -1403,9 +1433,6 @@ jobs:
               return m.toString() + ":" + (if (sec < 10) "0" else "") + sec
           }
 
-          // ============================================================
-          // 预览/播放面板
-          // ============================================================
           sealed interface PreviewState {
               data object Loading : PreviewState
               data class TextContent(val content: String) : PreviewState
@@ -1537,8 +1564,8 @@ jobs:
                               Image(bitmap = s.bitmap.asImageBitmap(), contentDescription = item.name,
                                   modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                           }
-                          is PreviewState.Video -> VideoPlayerView(s.path)
-                          is PreviewState.Audio -> AudioPlayerView(s.path)
+                          is PreviewState.Video -> key(s.path) { VideoPlayerView(s.path) }
+                          is PreviewState.Audio -> key(s.path) { AudioPlayerView(s.path) }
                           is PreviewState.Archive -> {
                               LazyColumn(Modifier.fillMaxWidth().height(520.dp)) {
                                   item {
@@ -1944,7 +1971,7 @@ jobs:
                       }
                   }
                   Spacer(Modifier.height(32.dp))
-                  Text("Files - MD3 v2.5 - 内置视频/音频播放器 + 编辑 + 200+ 格式",
+                  Text("Files - MD3 v2.8 - 生命周期暂停 + 最佳实践修复",
                       style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                       modifier = Modifier.fillMaxWidth())
               }
