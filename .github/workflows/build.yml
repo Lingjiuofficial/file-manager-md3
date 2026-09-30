@@ -80,8 +80,8 @@ jobs:
                   applicationId = "com.example.filemanagermd3"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 5
-                  versionName = "1.4"
+                  versionCode = 6
+                  versionName = "1.5"
               }
 
               buildTypes {
@@ -216,7 +216,6 @@ jobs:
           import android.os.Bundle
           import android.os.Environment
           import android.provider.Settings
-          import android.util.LruCache
           import android.webkit.MimeTypeMap
           import android.widget.Toast
           import androidx.activity.ComponentActivity
@@ -404,10 +403,18 @@ jobs:
               "gradle","properties","ini","conf","log","toml","csv"
           )
 
+          private val EXT_TO_KIND: Map<String, FileKind> = HashMap<String, FileKind>(128).apply {
+              IMAGE_EXTS.forEach { put(it, FileKind.IMAGE) }
+              VIDEO_EXTS.forEach { put(it, FileKind.VIDEO) }
+              AUDIO_EXTS.forEach { put(it, FileKind.AUDIO) }
+              ARCHIVE_EXTS.forEach { put(it, FileKind.ARCHIVE) }
+              CODE_EXTS.forEach { put(it, FileKind.CODE) }
+              put("pdf", FileKind.PDF)
+          }
+
           private val DATE_FORMATTER: DateTimeFormatter =
               DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.getDefault())
           private val ZONE_ID: ZoneId = ZoneId.systemDefault()
-          private val subtitleCache = LruCache<String, String>(2000)
 
           @Immutable
           data class FileItem(
@@ -415,78 +422,80 @@ jobs:
               val name: String,
               val isDirectory: Boolean,
               val size: Long,
-              val lastModified: Long
+              val lastModified: Long,
+              val extension: String,
+              val kind: FileKind,
+              val subtitle: String
           ) {
-              val extension: String = if (isDirectory || !name.contains('.')) ""
-                  else name.substringAfterLast('.').lowercase(Locale.ROOT)
-
-              val kind: FileKind = when {
-                  isDirectory -> FileKind.FOLDER
-                  extension in IMAGE_EXTS -> FileKind.IMAGE
-                  extension in VIDEO_EXTS -> FileKind.VIDEO
-                  extension in AUDIO_EXTS -> FileKind.AUDIO
-                  extension in ARCHIVE_EXTS -> FileKind.ARCHIVE
-                  extension in CODE_EXTS -> FileKind.CODE
-                  extension == "pdf" -> FileKind.PDF
-                  else -> FileKind.FILE
-              }
+              val file: File get() = File(path)
           }
 
-          fun File.toItem() = FileItem(absolutePath, name, isDirectory,
-              if (isDirectory) 0L else length(), lastModified())
+          fun kindOf(extension: String, isDirectory: Boolean): FileKind {
+              if (isDirectory) return FileKind.FOLDER
+              return EXT_TO_KIND[extension] ?: FileKind.FILE
+          }
 
           fun humanSize(bytes: Long): String {
-              if (bytes < 1024L) return "$bytes B"
+              if (bytes < 1024L) return bytes.toString() + " B"
               val kb = bytes / 1024L
-              if (kb < 1024L) return "$kb KB"
+              if (kb < 1024L) return kb.toString() + " KB"
               val mb = kb / 1024L
               if (mb < 1024L) {
-                  if (mb < 10) {
+                  if (mb < 10L) {
                       val tenth = (kb % 1024L) * 10L / 1024L
-                      if (tenth == 0L) return "$mb MB"
-                      return "$mb.$tenth MB"
+                      if (tenth == 0L) return mb.toString() + " MB"
+                      return mb.toString() + "." + tenth.toString() + " MB"
                   }
-                  return "$mb MB"
+                  return mb.toString() + " MB"
               }
               val gb = mb / 1024L
-              return "$gb GB"
+              return gb.toString() + " GB"
           }
 
           fun formatDate(ts: Long): String =
               Instant.ofEpochMilli(ts).atZone(ZONE_ID).format(DATE_FORMATTER)
 
           fun kindLabel(k: FileKind): String = when (k) {
-              FileKind.IMAGE -> "图片"; FileKind.VIDEO -> "视频"; FileKind.AUDIO -> "音频"
-              FileKind.ARCHIVE -> "压缩包"; FileKind.CODE -> "文本"; FileKind.PDF -> "PDF"
-              FileKind.FOLDER -> "文件夹"; FileKind.FILE -> "文件"
+              FileKind.IMAGE -> "图片"
+              FileKind.VIDEO -> "视频"
+              FileKind.AUDIO -> "音频"
+              FileKind.ARCHIVE -> "压缩包"
+              FileKind.CODE -> "文本"
+              FileKind.PDF -> "PDF"
+              FileKind.FOLDER -> "文件夹"
+              FileKind.FILE -> "文件"
           }
 
-          fun getSubtitle(item: FileItem): String {
-              subtitleCache.get(item.path)?.let { return it }
-              val s = if (item.isDirectory) {
-                  "文件夹 · " + formatDate(item.lastModified)
-              } else {
-                  kindLabel(item.kind) + " · " + humanSize(item.size) + " · " + formatDate(item.lastModified)
-              }
-              subtitleCache.put(item.path, s)
-              return s
+          fun File.toItem(): FileItem {
+              val isDir = isDirectory
+              val sz = if (isDir) 0L else length()
+              val lm = lastModified()
+              val ext = if (isDir || !name.contains('.')) ""
+                  else name.substringAfterLast('.').lowercase(Locale.ROOT)
+              val k = kindOf(ext, isDir)
+              val sub = if (isDir) "文件夹 - " + formatDate(lm)
+                  else kindLabel(k) + " - " + humanSize(sz) + " - " + formatDate(lm)
+              return FileItem(
+                  path = absolutePath,
+                  name = name,
+                  isDirectory = isDir,
+                  size = sz,
+                  lastModified = lm,
+                  extension = ext,
+                  kind = k,
+                  subtitle = sub
+              )
           }
 
-          /**
-           * 用系统应用打开文件。
-           * 对于已知 MIME 用具体类型，未知扩展名（如 .ZTSD）回退到 "*/*"，
-           * 让系统弹出所有可能的应用供用户选择。
-           */
           fun openFileWithSystem(context: Context, item: FileItem) {
               if (item.isDirectory) return
               val mime = if (item.extension.isNotEmpty()) {
                   MimeTypeMap.getSingleton().getMimeTypeFromExtension(item.extension)
               } else null
-              // 未知扩展名 → 用 */* 让系统给用户选择
               val type = mime ?: "*/*"
               try {
                   val uri = FileProvider.getUriForFile(
-                      context, "${context.packageName}.fileprovider", File(item.path)
+                      context, context.packageName + ".fileprovider", item.file
                   )
                   val intent = Intent(Intent.ACTION_VIEW).apply {
                       setDataAndType(uri, type)
@@ -494,7 +503,7 @@ jobs:
                       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                   }
                   context.startActivity(intent)
-              } catch (_: Exception) {
+              } catch (e: Exception) {
                   Toast.makeText(context, "没有应用可以打开此文件", Toast.LENGTH_SHORT).show()
               }
           }
@@ -531,7 +540,8 @@ jobs:
               var currentTab by mutableStateOf(Tab.FILES)
               var gridMode by mutableStateOf(prefs.getBoolean("grid", false))
               var sortKey by mutableStateOf(
-                  runCatching { SortKey.valueOf(prefs.getString("sort","NAME")!!) }.getOrDefault(SortKey.NAME)
+                  runCatching { SortKey.valueOf(prefs.getString("sort","NAME") ?: "NAME") }
+                      .getOrDefault(SortKey.NAME)
               )
               var showHidden by mutableStateOf(prefs.getBoolean("hidden", false))
               var searchQuery by mutableStateOf("")
@@ -544,18 +554,20 @@ jobs:
                   private set
 
               init {
-                  prefs.getString("lastDir", null)?.let {
-                      val f = File(it)
+                  val lastDir = prefs.getString("lastDir", null)
+                  if (lastDir != null) {
+                      val f = File(lastDir)
                       if (f.exists() && f.isDirectory && f.canRead()) currentDir = f
                   }
                   refresh(force = false)
-                  refreshRecent(); refreshStarred()
+                  refreshRecent()
+                  refreshStarred()
               }
 
               private fun resolveRoot(app: Application): File {
                   val ext = Environment.getExternalStorageDirectory()
                   return if (ext.exists() && ext.canRead()) ext
-                  else app.getExternalFilesDir(null) ?: app.filesDir
+                      else app.getExternalFilesDir(null) ?: app.filesDir
               }
 
               private fun sortList(list: List<FileItem>, key: SortKey): List<FileItem> {
@@ -568,14 +580,6 @@ jobs:
                   return list.sortedWith(cmp)
               }
 
-              /**
-               * 智能刷新：
-               * 1. 缓存命中且非强制 → 立即显示缓存（0 延迟）
-               * 2. 后台检查目录 mtime
-               *    - 与缓存一致 → 什么都不做
-               *    - 不一致或强制 → 重读并更新 UI + 缓存
-               * 3. 三重校验（dir + sortKey + showHidden）防止过期协程覆盖
-               */
               fun refresh(force: Boolean = false) {
                   refreshJob?.cancel()
                   val dir = currentDir
@@ -584,7 +588,6 @@ jobs:
                   val currentHidden = showHidden
                   val cached = dirCache[dirPath]
 
-                  // 缓存命中：立即显示
                   if (!force && cached != null &&
                       cached.sortKey == currentSort && cached.showHidden == currentHidden) {
                       items = cached.items
@@ -592,10 +595,9 @@ jobs:
 
                   refreshJob = viewModelScope.launch {
                       val nowMtime = withContext(Dispatchers.IO) {
-                          try { dir.lastModified() } catch (_: Exception) { 0L }
+                          try { dir.lastModified() } catch (e: Exception) { 0L }
                       }
 
-                      // 命中且无变化 → 不重读
                       if (!force && cached != null &&
                           cached.dirMtime == nowMtime &&
                           cached.sortKey == currentSort &&
@@ -605,13 +607,12 @@ jobs:
 
                       val computed = withContext(Dispatchers.IO) {
                           val list = try { dir.listFiles()?.toList() ?: emptyList() }
-                                     catch (_: Exception) { emptyList() }
+                              catch (e: Exception) { emptyList() }
                           val filtered = list.filter { currentHidden || !it.name.startsWith(".") }
                               .map { it.toItem() }
                           sortList(filtered, currentSort)
                       }
 
-                      // 三重校验：目录、排序、隐藏文件设置都没变才写入
                       if (dir == currentDir &&
                           currentSort == sortKey &&
                           currentHidden == showHidden) {
@@ -622,7 +623,6 @@ jobs:
                   }
               }
 
-              /** 用户手动下拉刷新：显示指示器，忽略缓存强制重读 */
               fun pullToRefresh() {
                   viewModelScope.launch {
                       isRefreshing = true
@@ -632,11 +632,11 @@ jobs:
                           val currentSort = sortKey
                           val currentHidden = showHidden
                           val nowMtime = withContext(Dispatchers.IO) {
-                              try { dir.lastModified() } catch (_: Exception) { 0L }
+                              try { dir.lastModified() } catch (e: Exception) { 0L }
                           }
                           val computed = withContext(Dispatchers.IO) {
                               val list = try { dir.listFiles()?.toList() ?: emptyList() }
-                                         catch (_: Exception) { emptyList() }
+                                  catch (e: Exception) { emptyList() }
                               val filtered = list.filter { currentHidden || !it.name.startsWith(".") }
                                   .map { it.toItem() }
                               sortList(filtered, currentSort)
@@ -646,7 +646,6 @@ jobs:
                               dirCache[dirPath] = DirSnapshot(computed, nowMtime, currentSort, currentHidden)
                               items = computed
                           }
-                          // 最少展示 300ms
                           delay(300)
                       } finally {
                           isRefreshing = false
@@ -654,7 +653,6 @@ jobs:
                   }
               }
 
-              /** 应用内操作（新建/删除/重命名/粘贴）→ 直接失效缓存并强制刷新 */
               private fun invalidateAndRefresh() {
                   dirCache.remove(currentDir.absolutePath)
                   refresh(force = true)
@@ -679,7 +677,6 @@ jobs:
                   }
               }
 
-              /** 记录"最近"——只有成功打开文件后才调用 */
               fun recordRecent(item: FileItem) {
                   if (item.isDirectory) return
                   val list = (prefs.getString("recent","")?.split('\n')?.filter{it.isNotBlank()} ?: emptyList())
@@ -688,19 +685,21 @@ jobs:
                   refreshRecent()
               }
 
-              /** 打开文件夹（进入）；文件由 UI 层调用系统应用打开 */
               fun open(item: FileItem) {
                   if (!item.isDirectory) return
                   if (!item.file.canRead()) { showSnack("无法访问"); return }
                   currentDir = item.file
-                  searchQuery = ""; searchMode = false
+                  searchQuery = ""
+                  searchMode = false
                   prefs.edit().putString("lastDir", item.path).apply()
                   refresh(force = false)
               }
 
               fun navigateTo(dir: File) {
                   if (!dir.isDirectory || !dir.canRead()) { showSnack("无法访问"); return }
-                  currentDir = dir; searchQuery = ""; searchMode = false
+                  currentDir = dir
+                  searchQuery = ""
+                  searchMode = false
                   prefs.edit().putString("lastDir", dir.absolutePath).apply()
                   refresh(force = false)
               }
@@ -708,7 +707,8 @@ jobs:
               fun goUp(): Boolean {
                   val p = currentDir.parentFile ?: return false
                   if (!p.canRead()) return false
-                  navigateTo(p); return true
+                  navigateTo(p)
+                  return true
               }
 
               fun breadcrumbs(): List<File> {
@@ -732,7 +732,7 @@ jobs:
                           val lower = q.lowercase()
                           while (stack.isNotEmpty() && res.size < 300) {
                               val d = stack.removeFirst()
-                              val children = try { d.listFiles() } catch (_: Exception) { null } ?: continue
+                              val children = try { d.listFiles() } catch (e: Exception) { null } ?: continue
                               for (c in children) {
                                   if (c.name.startsWith(".")) continue
                                   if (c.name.lowercase().contains(lower)) res.add(c.toItem())
@@ -745,13 +745,17 @@ jobs:
                   }
               }
 
-              fun exitSearch() { searchQuery = ""; searchMode = false; refresh(force = false) }
+              fun exitSearch() {
+                  searchQuery = ""
+                  searchMode = false
+                  refresh(force = false)
+              }
 
               fun createFolder(name: String) {
                   if (name.isBlank()) return
                   viewModelScope.launch {
                       val ok = withContext(Dispatchers.IO) { File(currentDir, name).mkdirs() }
-                      if (ok) { invalidateAndRefresh(); showSnack("已创建「$name」") }
+                      if (ok) { invalidateAndRefresh(); showSnack("已创建「" + name + "」") }
                       else showSnack("创建失败")
                   }
               }
@@ -760,9 +764,9 @@ jobs:
                   if (name.isBlank()) return
                   viewModelScope.launch {
                       val ok = withContext(Dispatchers.IO) {
-                          try { File(currentDir, name).createNewFile() } catch (_: Exception) { false }
+                          try { File(currentDir, name).createNewFile() } catch (e: Exception) { false }
                       }
-                      if (ok) { invalidateAndRefresh(); showSnack("已创建「$name」") }
+                      if (ok) { invalidateAndRefresh(); showSnack("已创建「" + name + "」") }
                       else showSnack("创建失败")
                   }
               }
@@ -774,12 +778,13 @@ jobs:
                   viewModelScope.launch {
                       val ok = withContext(Dispatchers.IO) { item.file.renameTo(dest) }
                       if (ok) {
-                          subtitleCache.remove(item.path)
                           if (starredPaths.contains(item.path)) {
                               starredPaths = starredPaths - item.path + dest.absolutePath
                               prefs.edit().putStringSet("starred", starredPaths).apply()
                           }
-                          invalidateAndRefresh(); refreshStarred(); refreshRecent()
+                          invalidateAndRefresh()
+                          refreshStarred()
+                          refreshRecent()
                           showSnack("已重命名")
                       } else showSnack("重命名失败")
                   }
@@ -794,15 +799,23 @@ jobs:
                           starredPaths = starredPaths - item.path
                           prefs.edit().putStringSet("starred", starredPaths).apply()
                           if (clipboard?.path == item.path) clipboard = null
-                          subtitleCache.remove(item.path)
-                          invalidateAndRefresh(); refreshStarred(); refreshRecent()
+                          invalidateAndRefresh()
+                          refreshStarred()
+                          refreshRecent()
                           showSnack("已删除")
                       } else showSnack("删除失败")
                   }
               }
 
-              fun copy(item: FileItem) { clipboard = ClipData(ClipMode.COPY, item.path); showSnack("已复制") }
-              fun cut(item: FileItem) { clipboard = ClipData(ClipMode.CUT, item.path); showSnack("已剪切") }
+              fun copy(item: FileItem) {
+                  clipboard = ClipData(ClipMode.COPY, item.path)
+                  showSnack("已复制")
+              }
+
+              fun cut(item: FileItem) {
+                  clipboard = ClipData(ClipMode.CUT, item.path)
+                  showSnack("已剪切")
+              }
 
               fun pasteInto(target: File = currentDir) {
                   val cb = clipboard ?: return
@@ -819,14 +832,15 @@ jobs:
                                   if (src.renameTo(dest)) true
                                   else { val c = copyRec(src, dest); if (c) src.deleteRecursively(); c }
                               } else copyRec(src, dest)
-                          } catch (_: Exception) { false }
+                          } catch (e: Exception) { false }
                       }
                       if (ok) {
                           clipboard = null
                           if (target.absolutePath == currentDir.absolutePath) {
                               invalidateAndRefresh()
                           }
-                          refreshStarred(); refreshRecent()
+                          refreshStarred()
+                          refreshRecent()
                           showSnack("已粘贴")
                       } else showSnack("粘贴失败")
                   }
@@ -836,7 +850,7 @@ jobs:
                   if (src.isDirectory) src.copyRecursively(dest, overwrite = false)
                   else { dest.parentFile?.mkdirs(); src.copyTo(dest, overwrite = false) }
                   true
-              } catch (_: Exception) { false }
+              } catch (e: Exception) { false }
 
               private fun uniqueFile(dir: File, name: String): File {
                   var f = File(dir, name)
@@ -845,13 +859,13 @@ jobs:
                   val stem = if (dot > 0) name.substring(0, dot) else name
                   val ext = if (dot > 0) name.substring(dot) else ""
                   var i = 1
-                  while (f.exists()) { f = File(dir, "$stem ($i)$ext"); i++ }
+                  while (f.exists()) { f = File(dir, stem + " (" + i + ")" + ext); i++ }
                   return f
               }
 
               fun toggleStar(item: FileItem) {
                   starredPaths = if (starredPaths.contains(item.path)) starredPaths - item.path
-                                 else starredPaths + item.path
+                      else starredPaths + item.path
                   prefs.edit().putStringSet("starred", starredPaths).apply()
                   refreshStarred()
                   showSnack(if (starredPaths.contains(item.path)) "已收藏" else "已取消收藏")
@@ -859,12 +873,14 @@ jobs:
 
               fun isStarred(path: String) = starredPaths.contains(path)
 
-              fun updateGrid(g: Boolean) { gridMode = g; prefs.edit().putBoolean("grid", g).apply() }
+              fun updateGrid(g: Boolean) {
+                  gridMode = g
+                  prefs.edit().putBoolean("grid", g).apply()
+              }
 
               fun updateSort(k: SortKey) {
                   sortKey = k
                   prefs.edit().putString("sort", k.name).apply()
-                  // 排序变了，所有缓存的顺序都失效
                   dirCache.clear()
                   refresh(force = true)
               }
@@ -872,7 +888,6 @@ jobs:
               fun updateShowHidden(s: Boolean) {
                   showHidden = s
                   prefs.edit().putBoolean("hidden", s).apply()
-                  // 过滤条件变了，所有缓存失效
                   dirCache.clear()
                   refresh(force = true)
               }
@@ -917,8 +932,9 @@ jobs:
           @Composable
           fun FileIconBadge(item: FileItem, size: Int = 44) {
               val dark = isSystemInDarkTheme()
-              val (bg, fg) = (if (dark) colorCacheDark else colorCacheLight)[item.kind]
-                  ?: (Color.Transparent to Color.Unspecified)
+              val pair = (if (dark) colorCacheDark else colorCacheLight)[item.kind]
+              val bg = pair?.first ?: Color.Transparent
+              val fg = pair?.second ?: Color.Unspecified
               val icon = iconCache[item.kind] ?: Icons.Filled.InsertDriveFile
               Box(
                   modifier = Modifier.size(size.dp)
@@ -933,7 +949,6 @@ jobs:
           @OptIn(ExperimentalFoundationApi::class)
           @Composable
           fun FileRow(item: FileItem, starred: Boolean, onClick: () -> Unit, onMenu: () -> Unit) {
-              val subtitle = remember(item.path, item.size, item.lastModified) { getSubtitle(item) }
               Row(
                   modifier = Modifier.fillMaxWidth()
                       .clip(RoundedCornerShape(20.dp))
@@ -957,7 +972,7 @@ jobs:
                           }
                       }
                       Spacer(Modifier.height(2.dp))
-                      Text(subtitle, style = MaterialTheme.typography.labelMedium,
+                      Text(item.subtitle, style = MaterialTheme.typography.labelMedium,
                           color = MaterialTheme.colorScheme.onSurfaceVariant,
                           maxLines = 1, overflow = TextOverflow.Ellipsis)
                   }
@@ -1095,12 +1110,12 @@ jobs:
                           ListItem(
                               headlineContent = {
                                   Text(a.label, color = if (a.destructive) MaterialTheme.colorScheme.error
-                                                        else MaterialTheme.colorScheme.onSurface)
+                                      else MaterialTheme.colorScheme.onSurface)
                               },
                               leadingContent = {
                                   Icon(a.icon, null,
                                       tint = if (a.destructive) MaterialTheme.colorScheme.error
-                                             else MaterialTheme.colorScheme.onSurfaceVariant)
+                                          else MaterialTheme.colorScheme.onSurfaceVariant)
                               },
                               modifier = Modifier.fillMaxWidth()
                                   .clickable(enabled = a.enabled) { a.onClick(); onDismiss() }
@@ -1148,7 +1163,7 @@ jobs:
                   confirmButton = {
                       TextButton(onClick = { onConfirm(); onDismiss() }) {
                           Text(confirmText, color = if (destructive) MaterialTheme.colorScheme.error
-                                                   else MaterialTheme.colorScheme.primary)
+                              else MaterialTheme.colorScheme.primary)
                       }
                   },
                   dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
@@ -1212,9 +1227,9 @@ jobs:
                               try {
                                   settingsLauncher.launch(
                                       Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                                          .setData(Uri.parse("package:${ctx.packageName}"))
+                                          .setData(Uri.parse("package:" + ctx.packageName))
                                   )
-                              } catch (_: Exception) {
+                              } catch (e: Exception) {
                                   settingsLauncher.launch(
                                       Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
                                   )
@@ -1233,7 +1248,11 @@ jobs:
 
               val snackbar = remember { SnackbarHostState() }
               LaunchedEffect(vm.snackMessage) {
-                  vm.snackMessage?.let { snackbar.showSnackbar(it); vm.consumeSnack() }
+                  val msg = vm.snackMessage
+                  if (msg != null) {
+                      snackbar.showSnackbar(msg)
+                      vm.consumeSnack()
+                  }
               }
 
               var sheet by remember { mutableStateOf<UiSheet?>(null) }
@@ -1265,7 +1284,7 @@ jobs:
                                                   keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                                   decorationBox = { inner ->
                                                       Box {
-                                                          if (vm.searchQuery.isEmpty()) Text("搜索当前目录…",
+                                                          if (vm.searchQuery.isEmpty()) Text("搜索当前目录...",
                                                               color = MaterialTheme.colorScheme.onSurfaceVariant)
                                                           inner()
                                                       }
@@ -1279,7 +1298,7 @@ jobs:
                                               IconButton(onClick = { vm.goUp() }, enabled = canUp) {
                                                   Icon(Icons.Filled.ArrowBack, "返回",
                                                       tint = if (canUp) MaterialTheme.colorScheme.onSurface
-                                                             else MaterialTheme.colorScheme.onSurfaceVariant)
+                                                          else MaterialTheme.colorScheme.onSurfaceVariant)
                                               }
                                               Text(vm.currentDir.name.ifEmpty { "存储" },
                                                   style = MaterialTheme.typography.titleLarge,
@@ -1296,7 +1315,9 @@ jobs:
                                       }
                                       else -> Text(
                                           when (vm.currentTab) {
-                                              Tab.RECENT -> "最近"; Tab.STARRED -> "收藏"; else -> "设置"
+                                              Tab.RECENT -> "最近"
+                                              Tab.STARRED -> "收藏"
+                                              else -> "设置"
                                           },
                                           style = MaterialTheme.typography.titleLarge,
                                           fontWeight = FontWeight.Medium,
@@ -1314,11 +1335,11 @@ jobs:
                                           Surface(onClick = { vm.navigateTo(f) },
                                               shape = RoundedCornerShape(16.dp),
                                               color = if (last) MaterialTheme.colorScheme.secondaryContainer
-                                                      else MaterialTheme.colorScheme.surface) {
+                                                  else MaterialTheme.colorScheme.surface) {
                                               Text(if (f.name.isEmpty()) "存储" else f.name,
                                                   style = MaterialTheme.typography.labelMedium,
                                                   color = if (last) MaterialTheme.colorScheme.onSecondaryContainer
-                                                          else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                      else MaterialTheme.colorScheme.onSurfaceVariant,
                                                   modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
                                           }
                                           if (!last) Icon(Icons.Filled.ChevronRight, null,
@@ -1343,7 +1364,6 @@ jobs:
                   }
               ) { inner ->
                   Box(Modifier.fillMaxSize().padding(inner)) {
-                      // 只有文件/最近/收藏页支持下拉刷新
                       if (vm.currentTab != Tab.SETTINGS) {
                           PullToRefreshBox(
                               isRefreshing = vm.isRefreshing,
@@ -1400,7 +1420,7 @@ jobs:
                       val item = s.item
                       ActionSheet(
                           title = item.name,
-                          subtitle = getSubtitle(item),
+                          subtitle = item.subtitle,
                           actions = buildList {
                               add(SheetAction(
                                   if (item.isDirectory) Icons.Filled.FolderOpen else Icons.Filled.InsertDriveFile,
@@ -1463,7 +1483,7 @@ jobs:
                       onConfirm = { vm.rename(d.item, it) }, onDismiss = { dialog = null }
                   )
                   is UiDialog.Delete -> ConfirmDialog(
-                      title = "删除「${d.item.name}」？",
+                      title = "删除「" + d.item.name + "」？",
                       message = if (d.item.isDirectory)
                           "该文件夹及其中所有内容都将被删除，此操作不可撤销。"
                       else "此操作不可撤销。",
@@ -1474,9 +1494,6 @@ jobs:
               }
           }
 
-          /**
-           * 空状态用一个占满一屏的 LazyColumn，这样 PullToRefreshBox 可以下拉刷新
-           */
           @Composable
           fun EmptyStateList(title: String, subtitle: String) {
               LazyColumn(Modifier.fillMaxSize()) {
@@ -1520,17 +1537,19 @@ jobs:
                   Text("默认视图", style = MaterialTheme.typography.bodyLarge)
                   Spacer(Modifier.height(8.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      listOf("列表" to false, "网格" to true).forEach { (label, v) ->
+                      listOf("列表" to false, "网格" to true).forEach { pair ->
+                          val label = pair.first
+                          val v = pair.second
                           Surface(onClick = { vm.updateGrid(v) },
                               shape = RoundedCornerShape(20.dp),
                               color = if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
-                                      else MaterialTheme.colorScheme.surface,
+                                  else MaterialTheme.colorScheme.surface,
                               border = androidx.compose.foundation.BorderStroke(1.dp,
                                   if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
                                   else MaterialTheme.colorScheme.outline)) {
                               Text(label, style = MaterialTheme.typography.labelMedium,
                                   color = if (vm.gridMode == v) MaterialTheme.colorScheme.onSecondaryContainer
-                                          else MaterialTheme.colorScheme.onSurface,
+                                      else MaterialTheme.colorScheme.onSurface,
                                   modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                           }
                       }
@@ -1539,23 +1558,25 @@ jobs:
                   Text("排序方式", style = MaterialTheme.typography.bodyLarge)
                   Spacer(Modifier.height(8.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      listOf("名称" to SortKey.NAME, "大小" to SortKey.SIZE, "时间" to SortKey.MTIME).forEach { (label, v) ->
+                      listOf("名称" to SortKey.NAME, "大小" to SortKey.SIZE, "时间" to SortKey.MTIME).forEach { pair ->
+                          val label = pair.first
+                          val v = pair.second
                           Surface(onClick = { vm.updateSort(v) },
                               shape = RoundedCornerShape(20.dp),
                               color = if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
-                                      else MaterialTheme.colorScheme.surface,
+                                  else MaterialTheme.colorScheme.surface,
                               border = androidx.compose.foundation.BorderStroke(1.dp,
                                   if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
                                   else MaterialTheme.colorScheme.outline)) {
                               Text(label, style = MaterialTheme.typography.labelMedium,
                                   color = if (vm.sortKey == v) MaterialTheme.colorScheme.onSecondaryContainer
-                                          else MaterialTheme.colorScheme.onSurface,
+                                      else MaterialTheme.colorScheme.onSurface,
                                   modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                           }
                       }
                   }
                   Spacer(Modifier.height(32.dp))
-                  Text("Files · MD3 v1.4 · 智能缓存 + 下拉刷新 + 系统打开",
+                  Text("Files - MD3 v1.5 - 智能缓存 + 下拉刷新",
                       style = MaterialTheme.typography.labelSmall,
                       color = MaterialTheme.colorScheme.onSurfaceVariant,
                       modifier = Modifier.fillMaxWidth())
