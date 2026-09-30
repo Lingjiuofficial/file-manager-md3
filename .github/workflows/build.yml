@@ -65,7 +65,6 @@ jobs:
           android.nonTransitiveRClass=true
           org.gradle.parallel=true
           org.gradle.caching=true
-          org.gradle.configuration-cache=true
           EOF
 
           cat > app/build.gradle.kts << 'EOF' | sed 's/^  //'
@@ -83,14 +82,8 @@ jobs:
                   applicationId = "com.example.filemanagermd3"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 7
-                  versionName = "2.0"
-              }
-
-              signingConfigs {
-                  getByName("debug") {
-                      // 使用 AGP 自动生成的 debug keystore
-                  }
+                  versionCode = 8
+                  versionName = "2.1"
               }
 
               buildTypes {
@@ -120,15 +113,7 @@ jobs:
           kotlin {
               compilerOptions {
                   jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-                  freeCompilerArgs.addAll(
-                      "-Xjvm-default=all",
-                      "-opt-in=kotlin.RequiresOptIn"
-                  )
               }
-          }
-
-          composeCompiler {
-              enableStrongSkippingMode = true
           }
 
           dependencies {
@@ -345,7 +330,6 @@ jobs:
           import androidx.compose.runtime.Composable
           import androidx.compose.runtime.Immutable
           import androidx.compose.runtime.LaunchedEffect
-          import androidx.compose.runtime.derivedStateOf
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.remember
@@ -1217,17 +1201,15 @@ jobs:
               )
           }
 
-          // ============================================================
-          // 内置预览
-          // ============================================================
           sealed interface PreviewState {
               data object Loading : PreviewState
-              data class Text(val content: String) : PreviewState
-              data class Image(val bitmap: Bitmap) : PreviewState
+              data class TextContent(val content: String) : PreviewState
+              data class ImageContent(val bitmap: Bitmap) : PreviewState
               data class Archive(val entries: List<String>) : PreviewState
               data class Unsupported(val reason: String) : PreviewState
           }
 
+          @OptIn(ExperimentalMaterial3Api::class)
           @Composable
           fun PreviewSheet(item: FileItem, onDismiss: () -> Unit) {
               val context = LocalContext.current
@@ -1239,26 +1221,24 @@ jobs:
                           when (item.kind) {
                               FileKind.CODE -> {
                                   if (item.size > 2_000_000L) {
-                                      PreviewState.Text("文件过大（" + humanSize(item.size) + "），不支持内联预览")
+                                      PreviewState.TextContent("文件过大（" + humanSize(item.size) + "），不支持内联预览")
                                   } else {
-                                      PreviewState.Text(item.file.readText())
+                                      PreviewState.TextContent(item.file.readText())
                                   }
                               }
                               FileKind.IMAGE -> {
-                                  val opts = BitmapFactory.Options().apply {
-                                      inJustDecodeBounds = true
-                                  }
+                                  val opts = BitmapFactory.Options()
+                                  opts.inJustDecodeBounds = true
                                   BitmapFactory.decodeFile(item.path, opts)
                                   var sample = 1
                                   while (opts.outWidth / sample > 2048 ||
                                          opts.outHeight / sample > 2048) {
                                       sample *= 2
                                   }
-                                  val decodeOpts = BitmapFactory.Options().apply {
-                                      inSampleSize = sample
-                                  }
+                                  val decodeOpts = BitmapFactory.Options()
+                                  decodeOpts.inSampleSize = sample
                                   val bmp = BitmapFactory.decodeFile(item.path, decodeOpts)
-                                  if (bmp != null) PreviewState.Image(bmp)
+                                  if (bmp != null) PreviewState.ImageContent(bmp)
                                   else PreviewState.Unsupported("无法解码图片")
                               }
                               FileKind.ARCHIVE -> {
@@ -1266,13 +1246,17 @@ jobs:
                                       PreviewState.Unsupported("暂不支持 ." + item.extension + " 压缩包内预览")
                                   } else {
                                       val list = ArrayList<String>(64)
-                                      ZipFile(item.file).use { zip ->
-                                          val it = zip.entries()
-                                          while (it.hasMoreElements() && list.size < 500) {
-                                              list.add(it.nextElement().name)
+                                      try {
+                                          ZipFile(item.file).use { zip ->
+                                              val entries = zip.entries()
+                                              while (entries.hasMoreElements() && list.size < 500) {
+                                                  list.add(entries.nextElement().name)
+                                              }
                                           }
+                                          PreviewState.Archive(list)
+                                      } catch (e2: Exception) {
+                                          PreviewState.Unsupported("无法读取压缩包")
                                       }
-                                      PreviewState.Archive(list)
                                   }
                               }
                               else -> PreviewState.Unsupported("该格式暂不支持内置预览")
@@ -1303,7 +1287,7 @@ jobs:
                                   Text("加载中...", color = MaterialTheme.colorScheme.onSurfaceVariant)
                               }
                           }
-                          is PreviewState.Text -> {
+                          is PreviewState.TextContent -> {
                               Column(
                                   Modifier.fillMaxWidth().height(520.dp)
                                       .verticalScroll(rememberScrollState())
@@ -1316,7 +1300,7 @@ jobs:
                                       color = MaterialTheme.colorScheme.onSurface)
                               }
                           }
-                          is PreviewState.Image -> {
+                          is PreviewState.ImageContent -> {
                               Box(Modifier.fillMaxWidth().height(520.dp),
                                   contentAlignment = Alignment.Center) {
                                   Image(bitmap = s.bitmap.asImageBitmap(),
@@ -1627,7 +1611,6 @@ jobs:
                   }
               }
 
-              // 预览
               val p = previewItem
               if (p != null) {
                   PreviewSheet(item = p, onDismiss = {
@@ -1799,7 +1782,7 @@ jobs:
                       }
                   }
                   Spacer(Modifier.height(32.dp))
-                  Text("Files - MD3 v2.0 - 内置预览 + Release 优化",
+                  Text("Files - MD3 v2.1 - Release + 内置预览",
                       style = MaterialTheme.typography.labelSmall,
                       color = MaterialTheme.colorScheme.onSurfaceVariant,
                       modifier = Modifier.fillMaxWidth())
