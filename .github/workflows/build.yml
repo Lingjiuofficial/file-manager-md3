@@ -296,7 +296,13 @@ jobs:
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.dp
           import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
           import androidx.lifecycle.viewmodel.compose.viewModel
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.Job
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
           import java.io.File
           import java.text.SimpleDateFormat
           import java.util.Date
@@ -386,9 +392,12 @@ jobs:
           fun Long.humanSize(): String {
               if (this < 1024) return "$this B"
               val units = arrayOf("KB","MB","GB","TB")
-              var v = this.toDouble() / 1024
+              var v = this.toDouble()
               var i = -1
-              while (v >= 1024 && i < units.size - 1) { v /= 1024; i++ }
+              while (v >= 1024.0 && i < units.size - 1) {
+                  v /= 1024.0
+                  i++
+              }
               return String.format(Locale.US, if (v < 10) "%.1f %s" else "%.0f %s", v, units[i])
           }
 
@@ -399,6 +408,8 @@ jobs:
 
           class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
               private val prefs = app.getSharedPreferences("fm_md3", 0)
+              private var searchJob: Job? = null
+              private var refreshJob: Job? = null
 
               var currentDir by mutableStateOf(resolveRoot(app))
                   private set
@@ -434,28 +445,51 @@ jobs:
                   else app.getExternalFilesDir(null) ?: app.filesDir
               }
 
-              fun refresh() {
-                  val list = try { currentDir.listFiles()?.toList() ?: emptyList() } catch (_: Exception) { emptyList() }
-                  val filtered = list.filter { showHidden || !it.name.startsWith(".") }.map { it.toItem() }
-                  items = sortList(filtered)
-              }
-
-              fun refreshRecent() {
-                  val recent = prefs.getString("recent", "")?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
-                  recentItems = recent.mapNotNull { File(it).takeIf { f -> f.exists() }?.toItem() }
-              }
-
-              fun refreshStarred() {
-                  starredItems = starredPaths.mapNotNull { File(it).takeIf { f -> f.exists() }?.toItem() }
-              }
-
-              private fun sortList(list: List<FileItem>) = list.sortedWith(
-                  when (sortKey) {
+              private fun sortList(list: List<FileItem>, key: SortKey): List<FileItem> {
+                  val cmp = when (key) {
                       SortKey.NAME -> compareBy<FileItem> { !it.isDirectory }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
                       SortKey.SIZE -> compareBy<FileItem> { !it.isDirectory }.thenBy { it.size }
                       SortKey.MTIME -> compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.lastModified }
                   }
-              )
+                  return list.sortedWith(cmp)
+              }
+
+              fun refresh() {
+                  refreshJob?.cancel()
+                  val dir = currentDir
+                  val showHid = showHidden
+                  val key = sortKey
+                  refreshJob = viewModelScope.launch {
+                      val computed = withContext(Dispatchers.IO) {
+                          val list = try {
+                              dir.listFiles()?.toList() ?: emptyList()
+                          } catch (_: Exception) { emptyList() }
+                          val filtered = list.filter { showHid || !it.name.startsWith(".") }
+                              .map { it.toItem() }
+                          sortList(filtered, key)
+                      }
+                      if (dir == currentDir) items = computed
+                  }
+              }
+
+              fun refreshRecent() {
+                  viewModelScope.launch {
+                      val recent = prefs.getString("recent", "")
+                          ?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+                      recentItems = withContext(Dispatchers.IO) {
+                          recent.mapNotNull { File(it).takeIf { f -> f.exists() }?.toItem() }
+                      }
+                  }
+              }
+
+              fun refreshStarred() {
+                  viewModelScope.launch {
+                      val paths = starredPaths
+                      starredItems = withContext(Dispatchers.IO) {
+                          paths.mapNotNull { File(it).takeIf { f -> f.exists() }?.toItem() }
+                      }
+                  }
+              }
 
               fun open(item: FileItem) {
                   if (item.isDirectory) {
@@ -494,59 +528,81 @@ jobs:
 
               fun doSearch(q: String) {
                   searchQuery = q
+                  searchJob?.cancel()
                   if (q.isBlank()) { refresh(); return }
-                  val results = ArrayList<FileItem>()
-                  val stack = ArrayDeque<File>().apply { add(currentDir) }
-                  val lower = q.lowercase()
-                  while (stack.isNotEmpty() && results.size < 300) {
-                      val dir = stack.removeFirst()
-                      val children = try { dir.listFiles() } catch (_: Exception) { null } ?: continue
-                      for (c in children) {
-                          if (c.name.startsWith(".")) continue
-                          if (c.name.lowercase().contains(lower)) results.add(c.toItem())
-                          if (c.isDirectory) stack.add(c)
+                  val dir = currentDir
+                  val key = sortKey
+                  searchJob = viewModelScope.launch {
+                      delay(250)
+                      val results = withContext(Dispatchers.IO) {
+                          val res = ArrayList<FileItem>()
+                          val stack = ArrayDeque<File>().apply { add(dir) }
+                          val lower = q.lowercase()
+                          while (stack.isNotEmpty() && res.size < 300) {
+                              val d = stack.removeFirst()
+                              val children = try { d.listFiles() } catch (_: Exception) { null } ?: continue
+                              for (c in children) {
+                                  if (c.name.startsWith(".")) continue
+                                  if (c.name.lowercase().contains(lower)) res.add(c.toItem())
+                                  if (c.isDirectory) stack.add(c)
+                              }
+                          }
+                          sortList(res, key)
                       }
+                      if (q == searchQuery) items = results
                   }
-                  items = sortList(results)
               }
 
               fun exitSearch() { searchQuery = ""; searchMode = false; refresh() }
 
               fun createFolder(name: String) {
                   if (name.isBlank()) return
-                  if (File(currentDir, name).mkdirs()) { refresh(); showSnack("已创建「$name」") }
-                  else showSnack("创建失败")
+                  viewModelScope.launch {
+                      val ok = withContext(Dispatchers.IO) { File(currentDir, name).mkdirs() }
+                      if (ok) { refresh(); showSnack("已创建「$name」") }
+                      else showSnack("创建失败")
+                  }
               }
 
               fun createFile(name: String) {
                   if (name.isBlank()) return
-                  try {
-                      if (File(currentDir, name).createNewFile()) { refresh(); showSnack("已创建「$name」") }
+                  viewModelScope.launch {
+                      val ok = withContext(Dispatchers.IO) {
+                          try { File(currentDir, name).createNewFile() } catch (_: Exception) { false }
+                      }
+                      if (ok) { refresh(); showSnack("已创建「$name」") }
                       else showSnack("创建失败")
-                  } catch (_: Exception) { showSnack("创建失败") }
+                  }
               }
 
               fun rename(item: FileItem, newName: String) {
                   if (newName.isBlank() || newName == item.name) return
                   val dest = File(item.file.parentFile, newName)
                   if (dest.exists()) { showSnack("已存在同名项目"); return }
-                  if (item.file.renameTo(dest)) {
-                      if (starredPaths.contains(item.path)) {
-                          starredPaths = starredPaths - item.path + dest.absolutePath
-                          prefs.edit().putStringSet("starred", starredPaths).apply()
-                      }
-                      refresh(); refreshStarred(); refreshRecent(); showSnack("已重命名")
-                  } else showSnack("重命名失败")
+                  viewModelScope.launch {
+                      val ok = withContext(Dispatchers.IO) { item.file.renameTo(dest) }
+                      if (ok) {
+                          if (starredPaths.contains(item.path)) {
+                              starredPaths = starredPaths - item.path + dest.absolutePath
+                              prefs.edit().putStringSet("starred", starredPaths).apply()
+                          }
+                          refresh(); refreshStarred(); refreshRecent(); showSnack("已重命名")
+                      } else showSnack("重命名失败")
+                  }
               }
 
               fun delete(item: FileItem) {
-                  val ok = if (item.isDirectory) item.file.deleteRecursively() else item.file.delete()
-                  if (ok) {
-                      starredPaths = starredPaths - item.path
-                      prefs.edit().putStringSet("starred", starredPaths).apply()
-                      if (clipboard?.path == item.path) clipboard = null
-                      refresh(); refreshStarred(); refreshRecent(); showSnack("已删除")
-                  } else showSnack("删除失败")
+                  viewModelScope.launch {
+                      val ok = withContext(Dispatchers.IO) {
+                          if (item.isDirectory) item.file.deleteRecursively() else item.file.delete()
+                      }
+                      if (ok) {
+                          starredPaths = starredPaths - item.path
+                          prefs.edit().putStringSet("starred", starredPaths).apply()
+                          if (clipboard?.path == item.path) clipboard = null
+                          refresh(); refreshStarred(); refreshRecent(); showSnack("已删除")
+                      } else showSnack("删除失败")
+                  }
               }
 
               fun copy(item: FileItem) { clipboard = ClipData(ClipMode.COPY, item.path); showSnack("已复制") }
@@ -559,17 +615,21 @@ jobs:
                   if (src.isDirectory && target.absolutePath.startsWith(src.absolutePath + "/")) {
                       showSnack("不能移动到自身子目录"); return
                   }
-                  val dest = uniqueFile(target, src.name)
-                  val ok = try {
-                      if (cb.mode == ClipMode.CUT) {
-                          if (src.renameTo(dest)) true
-                          else { val c = copyRec(src, dest); if (c) src.deleteRecursively(); c }
-                      } else copyRec(src, dest)
-                  } catch (_: Exception) { false }
-                  if (ok) {
-                      clipboard = null
-                      refresh(); refreshStarred(); refreshRecent(); showSnack("已粘贴")
-                  } else showSnack("粘贴失败")
+                  viewModelScope.launch {
+                      val ok = withContext(Dispatchers.IO) {
+                          try {
+                              val dest = uniqueFile(target, src.name)
+                              if (cb.mode == ClipMode.CUT) {
+                                  if (src.renameTo(dest)) true
+                                  else { val c = copyRec(src, dest); if (c) src.deleteRecursively(); c }
+                              } else copyRec(src, dest)
+                          } catch (_: Exception) { false }
+                      }
+                      if (ok) {
+                          clipboard = null
+                          refresh(); refreshStarred(); refreshRecent(); showSnack("已粘贴")
+                      } else showSnack("粘贴失败")
+                  }
               }
 
               private fun copyRec(src: File, dest: File): Boolean = try {
@@ -593,7 +653,7 @@ jobs:
                   starredPaths = if (starredPaths.contains(item.path)) starredPaths - item.path
                                  else starredPaths + item.path
                   prefs.edit().putStringSet("starred", starredPaths).apply()
-                  refreshStarred(); refresh()
+                  refreshStarred()
                   showSnack(if (starredPaths.contains(item.path)) "已收藏" else "已取消收藏")
               }
 
@@ -1027,11 +1087,11 @@ jobs:
                                   }
                               }
                               if (vm.currentTab == Tab.FILES && !vm.searchMode) {
+                                  val crumbs = remember(vm.currentDir) { vm.breadcrumbs() }
                                   Row(Modifier.fillMaxWidth()
                                       .horizontalScroll(rememberScrollState())
                                       .padding(horizontal = 12.dp, vertical = 4.dp),
                                       verticalAlignment = Alignment.CenterVertically) {
-                                      val crumbs = vm.breadcrumbs()
                                       crumbs.forEachIndexed { i, f ->
                                           val last = i == crumbs.lastIndex
                                           Surface(onClick = { vm.navigateTo(f) },
