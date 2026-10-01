@@ -65,6 +65,8 @@ jobs:
           android.nonTransitiveRClass=true
           org.gradle.parallel=true
           org.gradle.caching=true
+          android.enableR8.fullMode=true
+          android.experimental.enableNewResourceShrinker=true
           EOF
 
           cat > app/build.gradle.kts << 'EOF' | sed 's/^  //'
@@ -82,8 +84,8 @@ jobs:
                   applicationId = "com.example.filemanagermd3"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 19
-                  versionName = "3.3"
+                  versionCode = 22
+                  versionName = "4.0"
               }
 
               buildTypes {
@@ -94,6 +96,7 @@ jobs:
                       isShrinkResources = true
                       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
                       signingConfig = signingConfigs.getByName("debug")
+                      ndk { debugSymbolLevel = "none" }
                   }
               }
               compileOptions {
@@ -136,6 +139,9 @@ jobs:
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
               <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
               <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
               <uses-permission android:name="android.permission.INTERNET" />
               <application
@@ -242,6 +248,7 @@ jobs:
           import android.os.Build
           import android.os.Bundle
           import android.os.Environment
+          import android.provider.MediaStore
           import android.provider.Settings
           import android.webkit.MimeTypeMap
           import android.widget.Toast
@@ -408,10 +415,16 @@ jobs:
           import java.util.zip.ZipOutputStream
 
           // ============================================================
-          // 主题风格
+          // IO 调度器：限制并发到 4 线程，防止磁盘抖动
+          // ============================================================
+          object AppIo {
+              val batch = Dispatchers.IO.limitedParallelism(4)
+          }
+
+          // ============================================================
+          // 主题
           // ============================================================
           enum class UiStyle { MATERIAL_YOU, MI_MINIX }
-
           val LocalUiStyle = compositionLocalOf { UiStyle.MATERIAL_YOU }
 
           private val LightColors = lightColorScheme(
@@ -446,8 +459,6 @@ jobs:
           fun MD3Theme(uiStyle: UiStyle, content: @Composable () -> Unit) {
               val dark = isSystemInDarkTheme()
               val context = LocalContext.current
-              // 两个风格都使用 Material You 动态取色（Android 12+），降级到预设
-              // 视觉差异（Minix 的圆角/底栏样式/间距）由 LocalUiStyle 在 UI 层处理
               val colorScheme = remember(dark) {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                       if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
@@ -605,6 +616,7 @@ jobs:
           data class FileItem(
               val path: String,
               val name: String,
+              val lowerName: String,
               val isDirectory: Boolean,
               val size: Long,
               val lastModified: Long,
@@ -667,7 +679,17 @@ jobs:
               val k = kindOf(ext, isDir)
               val sub = if (isDir) "文件夹 - " + formatDate(lm)
                   else kindLabel(k) + " - " + humanSize(sz) + " - " + formatDate(lm)
-              return FileItem(absolutePath, name, isDir, sz, lm, ext, k, sub)
+              return FileItem(
+                  path = absolutePath,
+                  name = name,
+                  lowerName = name.lowercase(Locale.ROOT),
+                  isDirectory = isDir,
+                  size = sz,
+                  lastModified = lm,
+                  extension = ext,
+                  kind = k,
+                  subtitle = sub
+              )
           }
 
           fun mimeOf(extension: String): String {
@@ -761,38 +783,75 @@ jobs:
           }
 
           // ============================================================
+          // MediaStore 快速扫描（系统预索引，比 File 遍历快 10 倍）
+          // ============================================================
+          fun scanViaMediaStore(context: Context, kind: FileKind): List<FileItem> {
+              val collection = when (kind) {
+                  FileKind.AUDIO -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                  FileKind.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                  FileKind.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                  else -> return emptyList()
+              }
+              val projection = arrayOf(
+                  MediaStore.MediaColumns.DATA,
+                  MediaStore.MediaColumns.DISPLAY_NAME,
+                  MediaStore.MediaColumns.SIZE,
+                  MediaStore.MediaColumns.DATE_MODIFIED
+              )
+              val out = ArrayList<FileItem>(256)
+              try {
+                  context.contentResolver.query(
+                      collection, projection, null, null,
+                      MediaStore.MediaColumns.DATE_MODIFIED + " DESC"
+                  )?.use { c ->
+                      val iData = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+                      val iName = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                      val iSize = c.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                      val iMod = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                      while (c.moveToNext()) {
+                          val path = if (iData >= 0) c.getString(iData) else null
+                          if (path.isNullOrEmpty()) continue
+                          val name = if (iName >= 0) c.getString(iName) ?: path.substringAfterLast('/')
+                              else path.substringAfterLast('/')
+                          val size = if (iSize >= 0) c.getLong(iSize) else 0L
+                          val mod = if (iMod >= 0) c.getLong(iMod) * 1000L else 0L
+                          val f = File(path)
+                          if (!f.exists()) continue
+                          val ext = if (name.contains('.')) name.substringAfterLast('.').lowercase(Locale.ROOT) else ""
+                          val k = kindOf(ext, false)
+                          val sub = kindLabel(k) + " - " + humanSize(size) + " - " + formatDate(mod)
+                          out.add(FileItem(
+                              path = path,
+                              name = name,
+                              lowerName = name.lowercase(Locale.ROOT),
+                              isDirectory = false,
+                              size = size,
+                              lastModified = mod,
+                              extension = ext,
+                              kind = k,
+                              subtitle = sub
+                          ))
+                      }
+                  }
+              } catch (_: Exception) {}
+              return out
+          }
+
+          // ============================================================
           // Zip 编辑器（流式重建）
           // ============================================================
           object ZipEditor {
               private const val BUF_SIZE = 16 * 1024
 
-              /** 删除条目：entriesToRemove 精确匹配；prefixToRemove 若不为 null 则删除以此开头的所有条目 */
               fun removeEntries(zipFile: File, entriesToRemove: Set<String>, prefixToRemove: String?): Boolean {
-                  return rebuild(zipFile) { name, zin, zout ->
+                  return rebuild(zipFile) { name ->
                       val shouldRemove = entriesToRemove.contains(name) ||
                           (prefixToRemove != null && (name == prefixToRemove || name.startsWith(prefixToRemove)))
                       !shouldRemove
                   }
               }
 
-              /** 重命名条目（支持目录：会同时重命名目录下的所有条目） */
               fun renameEntry(zipFile: File, oldName: String, newName: String, isDirectory: Boolean): Boolean {
-                  return rebuild(zipFile) { name, _, _ ->
-                      if (isDirectory) {
-                          // 目录重命名：oldName 是目录（末尾带 /），把前缀替换
-                          if (name == oldName || name.startsWith(oldName)) {
-                              // 转换后返回 true，但需要重写条目名
-                          } else true
-                      } else {
-                          name != oldName
-                      }
-                  }.let { _ ->
-                      // 上面只是占位，实际执行下面真正的重命名逻辑
-                      renameImpl(zipFile, oldName, newName, isDirectory)
-                  }
-              }
-
-              private fun renameImpl(zipFile: File, oldName: String, newName: String, isDirectory: Boolean): Boolean {
                   val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
                   return try {
                       ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
@@ -802,9 +861,8 @@ jobs:
                               while (entry != null) {
                                   val name = entry.name
                                   val renamed = if (isDirectory) {
-                                      if (name == oldName || name.startsWith(oldName)) {
-                                          newName + name.removePrefix(oldName)
-                                      } else name
+                                      if (name == oldName || name.startsWith(oldName)) newName + name.removePrefix(oldName)
+                                      else name
                                   } else {
                                       if (name == oldName) newName else name
                                   }
@@ -813,9 +871,7 @@ jobs:
                                   }
                                   zout.putNextEntry(newEntry)
                                   var len: Int
-                                  while (zin.read(buffer).also { len = it } > 0) {
-                                      zout.write(buffer, 0, len)
-                                  }
+                                  while (zin.read(buffer).also { len = it } > 0) zout.write(buffer, 0, len)
                                   zout.closeEntry()
                                   zin.closeEntry()
                                   entry = zin.nextEntry
@@ -829,7 +885,6 @@ jobs:
                   }
               }
 
-              /** 添加空文件夹（末尾带 / 的 ZipEntry） */
               fun addEmptyFolder(zipFile: File, folderPath: String): Boolean {
                   val normalized = if (folderPath.endsWith("/")) folderPath else "$folderPath/"
                   val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
@@ -847,17 +902,14 @@ jobs:
                                   }
                                   zout.putNextEntry(newEntry)
                                   var len: Int
-                                  while (zin.read(buffer).also { len = it } > 0) {
-                                      zout.write(buffer, 0, len)
-                                  }
+                                  while (zin.read(buffer).also { len = it } > 0) zout.write(buffer, 0, len)
                                   zout.closeEntry()
                                   zin.closeEntry()
                                   entry = zin.nextEntry
                               }
                               if (!exists) {
-                                  val newEntry = ZipEntry(normalized).apply { time = System.currentTimeMillis() }
-                                  zout.putNextEntry(newEntry)
-                                  zout.closeEntry()
+                                  val ne = ZipEntry(normalized).apply { time = System.currentTimeMillis() }
+                                  zout.putNextEntry(ne); zout.closeEntry()
                               }
                           }
                       }
@@ -868,7 +920,6 @@ jobs:
                   }
               }
 
-              /** 添加一组文件（innerPath -> sourceFile） */
               fun addFiles(zipFile: File, additions: List<Pair<String, File>>): Boolean {
                   if (additions.isEmpty()) return false
                   val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
@@ -886,9 +937,7 @@ jobs:
                                   }
                                   zout.putNextEntry(newEntry)
                                   var len: Int
-                                  while (zin.read(buffer).also { len = it } > 0) {
-                                      zout.write(buffer, 0, len)
-                                  }
+                                  while (zin.read(buffer).also { len = it } > 0) zout.write(buffer, 0, len)
                                   zout.closeEntry()
                                   zin.closeEntry()
                                   entry = zin.nextEntry
@@ -896,13 +945,11 @@ jobs:
                               for ((inner, src) in additions) {
                                   if (inner in existing) continue
                                   if (src.isDirectory) continue
-                                  val newEntry = ZipEntry(inner).apply { time = System.currentTimeMillis() }
-                                  zout.putNextEntry(newEntry)
+                                  val ne = ZipEntry(inner).apply { time = System.currentTimeMillis() }
+                                  zout.putNextEntry(ne)
                                   src.inputStream().buffered().use { input ->
                                       var len: Int
-                                      while (input.read(buffer).also { len = it } > 0) {
-                                          zout.write(buffer, 0, len)
-                                      }
+                                      while (input.read(buffer).also { len = it } > 0) zout.write(buffer, 0, len)
                                   }
                                   zout.closeEntry()
                               }
@@ -915,10 +962,7 @@ jobs:
                   }
               }
 
-              private inline fun rebuild(
-                  zipFile: File,
-                  keep: (String, ZipInputStream, ZipOutputStream) -> Boolean
-              ): Boolean {
+              private inline fun rebuild(zipFile: File, keep: (String) -> Boolean): Boolean {
                   val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
                   return try {
                       ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
@@ -927,15 +971,13 @@ jobs:
                               var entry = zin.nextEntry
                               while (entry != null) {
                                   val name = entry.name
-                                  if (keep(name, zin, zout)) {
+                                  if (keep(name)) {
                                       val newEntry = ZipEntry(name).apply {
                                           if (entry.time != -1L) time = entry.time
                                       }
                                       zout.putNextEntry(newEntry)
                                       var len: Int
-                                      while (zin.read(buffer).also { len = it } > 0) {
-                                          zout.write(buffer, 0, len)
-                                      }
+                                      while (zin.read(buffer).also { len = it } > 0) zout.write(buffer, 0, len)
                                       zout.closeEntry()
                                   }
                                   zin.closeEntry()
@@ -954,18 +996,9 @@ jobs:
                   if (tmp.length() <= 0L) { tmp.delete(); return false }
                   val backup = File(zipFile.parentFile, zipFile.name + ".bak_" + System.currentTimeMillis())
                   return if (zipFile.renameTo(backup)) {
-                      if (tmp.renameTo(zipFile)) {
-                          backup.delete()
-                          true
-                      } else {
-                          backup.renameTo(zipFile)
-                          tmp.delete()
-                          false
-                      }
-                  } else {
-                      tmp.delete()
-                      false
-                  }
+                      if (tmp.renameTo(zipFile)) { backup.delete(); true }
+                      else { backup.renameTo(zipFile); tmp.delete(); false }
+                  } else { tmp.delete(); false }
               }
           }
 
@@ -981,7 +1014,7 @@ jobs:
               val items: List<FileItem>, val dirMtime: Long,
               val sortKey: SortKey, val showHidden: Boolean
           )
-          private data class ScanSnapshot(val items: List<FileItem>, val timestamp: Long)
+          private data class ScanSnapshot(val items: List<FileItem>)
 
           class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
               private val prefs = app.getSharedPreferences("fm_md3", 0)
@@ -992,7 +1025,6 @@ jobs:
               private val categoryScanCache = ConcurrentHashMap<CategoryKind, ScanSnapshot>()
               private val maxCacheSize = 20
               private val maxScanResults = 2000
-              private val scanCacheTTL = 60_000L
 
               var currentDir by mutableStateOf(resolveRoot(app)); private set
               var items by mutableStateOf<List<FileItem>>(emptyList()); private set
@@ -1040,7 +1072,7 @@ jobs:
 
               private fun sortList(list: List<FileItem>, key: SortKey): List<FileItem> {
                   val cmp = when (key) {
-                      SortKey.NAME -> compareBy<FileItem> { !it.isDirectory }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+                      SortKey.NAME -> compareBy<FileItem> { !it.isDirectory }.thenBy { it.lowerName }
                       SortKey.SIZE -> compareBy<FileItem> { !it.isDirectory }.thenBy { it.size }
                       SortKey.MTIME -> compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.lastModified }
                   }
@@ -1077,6 +1109,7 @@ jobs:
               }
 
               fun pullToRefresh() {
+                  categoryScanCache.clear()
                   viewModelScope.launch {
                       isRefreshing = true
                       try {
@@ -1106,8 +1139,7 @@ jobs:
                   currentCategory = cat
                   if (cat == CategoryKind.ALL) { categoryItems = emptyList(); return }
                   val cached = categoryScanCache[cat]
-                  val now = System.currentTimeMillis()
-                  if (cached != null && now - cached.timestamp < scanCacheTTL) {
+                  if (cached != null) {
                       categoryItems = sortList(cached.items, sortKey); return
                   }
                   scanCategory(cat)
@@ -1115,16 +1147,17 @@ jobs:
 
               fun scanCategory(cat: CategoryKind) {
                   scanJob?.cancel()
+                  val context = getApplication<Application>()
                   scanJob = viewModelScope.launch {
                       isScanning = true
                       try {
-                          val root = resolveRoot(getApplication())
+                          val root = resolveRoot(context)
                           val currentSort = sortKey
-                          val result = withContext(Dispatchers.IO) {
-                              scanByCategory(root, cat, maxScanResults, currentSort)
+                          val result = withContext(AppIo.batch) {
+                              scanByCategory(root, cat, maxScanResults, currentSort, context)
                           }
                           if (cat == currentCategory) {
-                              categoryScanCache[cat] = ScanSnapshot(result, System.currentTimeMillis())
+                              categoryScanCache[cat] = ScanSnapshot(result)
                               categoryItems = result
                           }
                       } finally { isScanning = false }
@@ -1141,7 +1174,7 @@ jobs:
                           delay(300)
                           val root = resolveRoot(getApplication())
                           val currentSort = sortKey
-                          val result = withContext(Dispatchers.IO) {
+                          val result = withContext(AppIo.batch) {
                               searchGlobal(root, q, maxScanResults, currentSort)
                           }
                           if (q == globalSearchQuery) globalSearchResults = result
@@ -1155,7 +1188,21 @@ jobs:
                   globalSearchMode = false
               }
 
-              private fun scanByCategory(root: File, cat: CategoryKind, max: Int, key: SortKey): List<FileItem> {
+              private fun scanByCategory(
+                  root: File, cat: CategoryKind, max: Int, key: SortKey, context: Context
+              ): List<FileItem> {
+                  // MediaStore 快速路径（仅媒体类型）
+                  val mediaKind = when (cat) {
+                      CategoryKind.AUDIO -> FileKind.AUDIO
+                      CategoryKind.VIDEO -> FileKind.VIDEO
+                      CategoryKind.IMAGE -> FileKind.IMAGE
+                      else -> null
+                  }
+                  if (mediaKind != null) {
+                      val fast = scanViaMediaStore(context, mediaKind)
+                      if (fast.isNotEmpty()) return sortList(fast.take(max), key)
+                  }
+                  // 通用文件扫描（压缩包/文档/文本/安装包等）
                   val res = ArrayList<FileItem>(64)
                   val stack = ArrayDeque<File>(); stack.add(root)
                   while (stack.isNotEmpty() && res.size < max) {
@@ -1333,7 +1380,7 @@ jobs:
                       showSnack("不能移动到自身子目录"); return
                   }
                   viewModelScope.launch {
-                      val ok = withContext(Dispatchers.IO) {
+                      val ok = withContext(AppIo.batch) {
                           try {
                               val dest = uniqueFile(target, src.name)
                               if (cb.mode == ClipMode.CUT) {
@@ -1379,9 +1426,13 @@ jobs:
               fun updateGrid(g: Boolean) { gridMode = g; prefs.edit().putBoolean("grid", g).apply() }
               fun updateSort(k: SortKey) {
                   sortKey = k; prefs.edit().putString("sort", k.name).apply()
-                  dirCache.clear(); categoryScanCache.clear()
+                  dirCache.clear()
                   refresh(force = true)
-                  if (currentCategory != CategoryKind.ALL) scanCategory(currentCategory)
+                  if (currentCategory != CategoryKind.ALL) {
+                      val cached = categoryScanCache[currentCategory]
+                      if (cached != null) categoryItems = sortList(cached.items, k)
+                      else scanCategory(currentCategory)
+                  }
               }
               fun updateShowHidden(s: Boolean) { showHidden = s; prefs.edit().putBoolean("hidden", s).apply(); dirCache.clear(); refresh(force = true) }
               fun updatePreferredHz(hz: Float) { preferredHz = hz; prefs.edit().putFloat("preferredHz", hz).apply() }
@@ -1475,35 +1526,28 @@ jobs:
                   return count
               }
 
-              // ---- Zip 编辑 ----
               fun zipDeleteEntry(zipFile: File, entryName: String, isDirectory: Boolean): Boolean {
                   val ok = if (isDirectory) ZipEditor.removeEntries(zipFile, emptySet(), entryName)
                       else ZipEditor.removeEntries(zipFile, setOf(entryName), null)
-                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  if (ok) { refresh(force = true); categoryScanCache.remove(CategoryKind.ARCHIVE) }
                   return ok
               }
 
               fun zipRenameEntry(zipFile: File, oldName: String, newName: String, isDirectory: Boolean): Boolean {
                   val ok = ZipEditor.renameEntry(zipFile, oldName, newName, isDirectory)
-                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  if (ok) { refresh(force = true); categoryScanCache.remove(CategoryKind.ARCHIVE) }
                   return ok
               }
 
               fun zipAddFolder(zipFile: File, folderPath: String): Boolean {
                   val ok = ZipEditor.addEmptyFolder(zipFile, folderPath)
-                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  if (ok) { refresh(force = true); categoryScanCache.remove(CategoryKind.ARCHIVE) }
                   return ok
               }
 
               fun zipAddFile(zipFile: File, srcFile: File, innerName: String): Boolean {
                   val ok = ZipEditor.addFiles(zipFile, listOf(innerName to srcFile))
-                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
-                  return ok
-              }
-
-              fun zipAddMultiple(zipFile: File, additions: List<Pair<String, File>>): Boolean {
-                  val ok = ZipEditor.addFiles(zipFile, additions)
-                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  if (ok) { refresh(force = true); categoryScanCache.remove(CategoryKind.ARCHIVE) }
                   return ok
               }
 
@@ -1512,7 +1556,7 @@ jobs:
           }
 
           // ============================================================
-          // 图标 / 颜色
+          // UI 组件
           // ============================================================
           private fun badgeColors(kind: FileKind, cs: ColorScheme): Pair<Color, Color> = when (kind) {
               FileKind.FOLDER -> cs.primaryContainer to cs.onPrimaryContainer
@@ -1658,7 +1702,6 @@ jobs:
           fun FloatingNavBar(items: List<NavEntry>, selectedIndex: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
               val uiStyle = LocalUiStyle.current
               val cs = MaterialTheme.colorScheme
-              // Minix: 白底、圆角 24、无 tonal；Material You: surfaceContainer、圆角 28、tonalElevation 3
               val containerColor = if (uiStyle == UiStyle.MI_MINIX) cs.surface else cs.surfaceContainer
               val activeBg = if (uiStyle == UiStyle.MI_MINIX) cs.primary.copy(alpha = 0.14f)
                   else cs.secondaryContainer
@@ -1769,7 +1812,7 @@ jobs:
           }
 
           // ============================================================
-          // 全屏预览容器
+          // 全屏预览
           // ============================================================
           @Composable
           fun FullScreenPreview(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
@@ -1790,9 +1833,6 @@ jobs:
               }
           }
 
-          // ============================================================
-          // 全屏文本编辑器
-          // ============================================================
           @Composable
           fun TextEditorScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
               val scope = rememberCoroutineScope()
@@ -1877,9 +1917,6 @@ jobs:
               }
           }
 
-          // ============================================================
-          // 全屏图片查看器
-          // ============================================================
           @Composable
           fun ImageViewerScreen(item: FileItem, onDismiss: () -> Unit) {
               var bitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -1930,9 +1967,6 @@ jobs:
               }
           }
 
-          // ============================================================
-          // 全屏视频播放器
-          // ============================================================
           @Composable
           fun VideoPlayerScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
               val lifecycleOwner = LocalLifecycleOwner.current
@@ -2037,9 +2071,6 @@ jobs:
               }
           }
 
-          // ============================================================
-          // 全屏音频播放器
-          // ============================================================
           @Composable
           fun AudioPlayerScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
               val lifecycleOwner = LocalLifecycleOwner.current
@@ -2151,9 +2182,7 @@ jobs:
               }
           }
 
-          // ============================================================
-          // 全屏压缩包浏览器（子目录 + 完整编辑）
-          // ============================================================
+          @OptIn(ExperimentalFoundationApi::class)
           @Composable
           fun ArchiveBrowserScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
               val context = LocalContext.current
@@ -2170,7 +2199,7 @@ jobs:
 
               LaunchedEffect(item.path, reloadKey) {
                   loading = true
-                  val (list, err) = withContext(Dispatchers.IO) {
+                  val (list, err) = withContext(AppIo.batch) {
                       if (item.extension != "zip" && item.extension != "jar") {
                           Pair<List<ZipEntryInfo>, String?>(emptyList(), "暂不支持 ." + item.extension + " 内浏览（当前仅支持 zip/jar）")
                       } else {
@@ -2226,7 +2255,6 @@ jobs:
                               }
                               IconButton(
                                   onClick = {
-                                      // 粘贴剪贴板文件到 zip 当前目录
                                       val cb = vm.clipboard
                                       if (cb == null) { vm.showSnack("请先复制一个文件"); return@IconButton }
                                       val src = File(cb.path)
@@ -2234,7 +2262,7 @@ jobs:
                                       val inner = currentPath + src.name
                                       scope.launch {
                                           busy = true
-                                          val ok = withContext(Dispatchers.IO) {
+                                          val ok = withContext(AppIo.batch) {
                                               vm.zipAddFile(item.file, src, inner)
                                           }
                                           busy = false
@@ -2249,7 +2277,7 @@ jobs:
                                       scope.launch {
                                           busy = true
                                           val target = item.file.parentFile ?: return@launch
-                                          val count = withContext(Dispatchers.IO) {
+                                          val count = withContext(AppIo.batch) {
                                               if (currentPath.isEmpty()) vm.extractZipTo(item.file, target)
                                               else vm.extractZipSubset(item.file, target, currentPath)
                                           }
@@ -2318,7 +2346,7 @@ jobs:
                                               if (e.isDirectory) currentPath = e.name
                                               else scope.launch {
                                                   val cacheDir = File(context.cacheDir, "zip_extract")
-                                                  val outFile = withContext(Dispatchers.IO) {
+                                                  val outFile = withContext(AppIo.batch) {
                                                       vm.extractZipEntry(item.file, e.name, cacheDir)
                                                   }
                                                   if (outFile == null) {
@@ -2372,7 +2400,6 @@ jobs:
                   }
               }
 
-              // 编辑条目菜单
               val t = editTarget
               if (t != null) {
                   val shortName = t.name.trimEnd('/').substringAfterLast('/')
@@ -2384,7 +2411,7 @@ jobs:
                               add(SheetAction(Icons.Filled.FolderOpen, "用其他应用打开") {
                                   scope.launch {
                                       val cacheDir = File(context.cacheDir, "zip_extract")
-                                      val outFile = withContext(Dispatchers.IO) {
+                                      val outFile = withContext(AppIo.batch) {
                                           vm.extractZipEntry(item.file, t.name, cacheDir)
                                       }
                                       if (outFile != null) {
@@ -2406,7 +2433,7 @@ jobs:
                                   scope.launch {
                                       busy = true
                                       val target = item.file.parentFile ?: return@launch
-                                      val count = withContext(Dispatchers.IO) {
+                                      val count = withContext(AppIo.batch) {
                                           vm.extractZipSubset(item.file, target, t.name)
                                       }
                                       busy = false
@@ -2418,7 +2445,7 @@ jobs:
                                   scope.launch {
                                       busy = true
                                       val target = item.file.parentFile ?: return@launch
-                                      val count = withContext(Dispatchers.IO) {
+                                      val count = withContext(AppIo.batch) {
                                           vm.extractZipSubset(item.file, target, t.name)
                                       }
                                       busy = false
@@ -2430,7 +2457,7 @@ jobs:
                           add(SheetAction(Icons.Filled.Delete, "从压缩包删除", destructive = true) {
                               scope.launch {
                                   busy = true
-                                  val ok = withContext(Dispatchers.IO) {
+                                  val ok = withContext(AppIo.batch) {
                                       vm.zipDeleteEntry(item.file, t.name, t.isDirectory)
                                   }
                                   busy = false
@@ -2443,7 +2470,6 @@ jobs:
                   )
               }
 
-              // 重命名对话框
               val rt = renameTarget
               if (rt != null) {
                   val shortName = rt.name.trimEnd('/').substringAfterLast('/')
@@ -2460,7 +2486,7 @@ jobs:
                           }
                           scope.launch {
                               busy = true
-                              val ok = withContext(Dispatchers.IO) {
+                              val ok = withContext(AppIo.batch) {
                                   vm.zipRenameEntry(item.file, rt.name, newName, rt.isDirectory)
                               }
                               busy = false
@@ -2472,7 +2498,6 @@ jobs:
                   )
               }
 
-              // 新建文件夹对话框
               if (showNewFolder) {
                   TextInputDialog(
                       title = "在压缩包内新建文件夹",
@@ -2482,7 +2507,7 @@ jobs:
                           val full = currentPath + name + "/"
                           scope.launch {
                               busy = true
-                              val ok = withContext(Dispatchers.IO) {
+                              val ok = withContext(AppIo.batch) {
                                   vm.zipAddFolder(item.file, full)
                               }
                               busy = false
@@ -2529,9 +2554,6 @@ jobs:
               return out.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
           }
 
-          // ============================================================
-          // 全局搜索全屏
-          // ============================================================
           @Composable
           fun GlobalSearchScreen(vm: FileManagerViewModel, onDismiss: () -> Unit) {
               BackHandler { onDismiss() }
@@ -2589,9 +2611,6 @@ jobs:
               }
           }
 
-          // ============================================================
-          // 不支持格式
-          // ============================================================
           @Composable
           fun UnsupportedScreen(item: FileItem, onDismiss: () -> Unit) {
               val context = LocalContext.current
@@ -2614,505 +2633,4 @@ jobs:
                           modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp))
                   }
                   Spacer(Modifier.height(16.dp))
-                  Surface(onClick = onDismiss, shape = RoundedCornerShape(24.dp),
-                      color = MaterialTheme.colorScheme.surfaceVariant) {
-                      Text("返回", color = MaterialTheme.colorScheme.onSurfaceVariant,
-                          style = MaterialTheme.typography.labelLarge,
-                          modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp))
-                  }
-              }
-          }
-
-          data class ZipEntryInfo(val name: String, val size: Long, val isDirectory: Boolean)
-
-          private fun fmtTime(ms: Int): String {
-              if (ms <= 0) return "0:00"
-              val s = ms / 1000
-              val m = s / 60
-              val sec = s % 60
-              return m.toString() + ":" + (if (sec < 10) "0" else "") + sec
-          }
-
-          // ============================================================
-          // 主界面
-          // ============================================================
-          private val navItems = listOf(
-              NavEntry(Icons.Filled.Folder, "文件"),
-              NavEntry(Icons.Filled.Schedule, "最近"),
-              NavEntry(Icons.Filled.Star, "收藏"),
-              NavEntry(Icons.Filled.Settings, "设置")
-          )
-
-          private sealed interface UiSheet {
-              data object NewMenu : UiSheet
-              data class ItemMenu(val item: FileItem) : UiSheet
-          }
-
-          private sealed interface UiDialog {
-              data object NewFolder : UiDialog
-              data object NewFile : UiDialog
-              data class Rename(val item: FileItem) : UiDialog
-              data class Delete(val item: FileItem) : UiDialog
-          }
-
-          private fun hasPermission(): Boolean {
-              return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager() else true
-          }
-
-          @OptIn(ExperimentalMaterial3Api::class)
-          @Composable
-          fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
-              val ctx = LocalContext.current
-              var granted by remember { mutableStateOf(hasPermission()) }
-              val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { granted = hasPermission() }
-              LaunchedEffect(Unit) { granted = hasPermission() }
-
-              if (!granted) {
-                  Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                      verticalArrangement = Arrangement.Center) {
-                      Icon(Icons.Filled.Folder, null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.primary)
-                      Spacer(Modifier.height(24.dp))
-                      Text("需要存储访问权限", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium)
-                      Spacer(Modifier.height(8.dp))
-                      Text("请授予「所有文件访问权限」以管理设备文件", style = MaterialTheme.typography.bodyMedium,
-                          color = MaterialTheme.colorScheme.onSurfaceVariant)
-                      Spacer(Modifier.height(24.dp))
-                      Surface(onClick = {
-                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                              try {
-                                  settingsLauncher.launch(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                                      .setData(Uri.parse("package:" + ctx.packageName)))
-                              } catch (e: Exception) {
-                                  settingsLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                              }
-                          }
-                      }, shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.primary) {
-                          Text("去授权", color = MaterialTheme.colorScheme.onPrimary,
-                              style = MaterialTheme.typography.labelLarge,
-                              modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
-                      }
-                  }
-                  return
-              }
-
-              val snackbar = remember { SnackbarHostState() }
-              LaunchedEffect(vm.snackMessage) {
-                  val msg = vm.snackMessage
-                  if (msg != null) { snackbar.showSnackbar(msg); vm.consumeSnack() }
-              }
-
-              var sheet by remember { mutableStateOf<UiSheet?>(null) }
-              var dialog by remember { mutableStateOf<UiDialog?>(null) }
-              var previewItem by remember { mutableStateOf<FileItem?>(null) }
-
-              val onOpenItem: (FileItem) -> Unit = { item ->
-                  when {
-                      item.isDirectory -> vm.open(item)
-                      item.kind == FileKind.APK -> { openFileWithSystem(ctx, item); vm.recordRecent(item) }
-                      else -> previewItem = item
-                  }
-              }
-
-              Scaffold(
-                  containerColor = MaterialTheme.colorScheme.background,
-                  snackbarHost = { SnackbarHost(snackbar) },
-                  topBar = {
-                      Surface(color = MaterialTheme.colorScheme.background) {
-                          Column(Modifier.statusBarsPadding()) {
-                              Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 4.dp),
-                                  verticalAlignment = Alignment.CenterVertically) {
-                                  when (vm.currentTab) {
-                                      Tab.FILES -> {
-                                          if (vm.currentCategory != CategoryKind.ALL) {
-                                              IconButton(onClick = { vm.selectCategory(CategoryKind.ALL) }) {
-                                                  Icon(Icons.Filled.ArrowBack, "返回")
-                                              }
-                                              Text(vm.currentCategory.label, style = MaterialTheme.typography.titleLarge,
-                                                  fontWeight = FontWeight.Medium,
-                                                  modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
-                                              if (vm.isScanning) Text("扫描中…", style = MaterialTheme.typography.labelSmall,
-                                                  color = MaterialTheme.colorScheme.primary)
-                                              IconButton(onClick = { vm.scanCategory(vm.currentCategory) }, enabled = !vm.isScanning) {
-                                                  Icon(Icons.Filled.Schedule, "重新扫描")
-                                              }
-                                          } else {
-                                              if (vm.searchMode) {
-                                                  IconButton(onClick = { vm.exitSearch() }) { Icon(Icons.Filled.ArrowBack, "返回") }
-                                                  BasicTextField(value = vm.searchQuery, onValueChange = { vm.doSearch(it) },
-                                                      modifier = Modifier.weight(1f),
-                                                      textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface,
-                                                          fontSize = MaterialTheme.typography.bodyLarge.fontSize),
-                                                      singleLine = true, cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                                      keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                                      decorationBox = { inner -> Box {
-                                                          if (vm.searchQuery.isEmpty()) Text("搜索当前目录...",
-                                                              color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                          inner()
-                                                      } })
-                                                  IconButton(onClick = { vm.exitSearch() }) { Icon(Icons.Filled.Close, "关闭") }
-                                              } else {
-                                                  val canUp = vm.currentDir.parentFile != null
-                                                  IconButton(onClick = { vm.goUp() }, enabled = canUp) {
-                                                      Icon(Icons.Filled.ArrowBack, "返回",
-                                                          tint = if (canUp) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
-                                                  }
-                                                  Text(vm.currentDir.name.ifEmpty { "存储" }, style = MaterialTheme.typography.titleLarge,
-                                                      fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                                      modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
-                                                  IconButton(onClick = { vm.globalSearchMode = true }) {
-                                                      Icon(Icons.Filled.Search, "全局搜索")
-                                                  }
-                                                  IconButton(onClick = { vm.updateGrid(!vm.gridMode) }) {
-                                                      Icon(if (vm.gridMode) Icons.Filled.ViewList else Icons.Filled.GridView, "切换视图")
-                                                  }
-                                              }
-                                          }
-                                      }
-                                      else -> Text(
-                                          when (vm.currentTab) { Tab.RECENT -> "最近"; Tab.STARRED -> "收藏"; else -> "设置" },
-                                          style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium,
-                                          modifier = Modifier.weight(1f).padding(horizontal = 16.dp))
-                                  }
-                              }
-                              if (vm.currentTab == Tab.FILES && vm.currentCategory == CategoryKind.ALL && !vm.searchMode) {
-                                  val crumbs = remember(vm.currentDir.path) { vm.breadcrumbs() }
-                                  Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                                      .padding(horizontal = 12.dp, vertical = 4.dp),
-                                      verticalAlignment = Alignment.CenterVertically) {
-                                      crumbs.forEachIndexed { i, f ->
-                                          val last = i == crumbs.lastIndex
-                                          Surface(onClick = { vm.navigateTo(f) }, shape = RoundedCornerShape(16.dp),
-                                              color = if (last) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface) {
-                                              Text(if (f.name.isEmpty()) "存储" else f.name, style = MaterialTheme.typography.labelMedium,
-                                                  color = if (last) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                  modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
-                                          }
-                                          if (!last) Icon(Icons.Filled.ChevronRight, null,
-                                              tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
-                                      }
-                                  }
-                                  CategoryBar(vm.currentCategory, vm::selectCategory)
-                              }
-                          }
-                      }
-                  },
-                  floatingActionButton = {
-                      if (vm.currentTab != Tab.SETTINGS && vm.currentCategory == CategoryKind.ALL) {
-                          FloatingActionButton(onClick = { sheet = UiSheet.NewMenu },
-                              modifier = Modifier.padding(bottom = 96.dp, end = 8.dp),
-                              containerColor = MaterialTheme.colorScheme.primaryContainer,
-                              contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                              shape = RoundedCornerShape(16.dp)) {
-                              Icon(if (vm.clipboard != null) Icons.Filled.ContentPaste else Icons.Filled.Add, "新建")
-                          }
-                      }
-                  }
-              ) { inner ->
-                  Box(Modifier.fillMaxSize().padding(inner)) {
-                      if (vm.currentTab == Tab.SETTINGS) SettingsScreen(vm)
-                      else if (vm.currentTab == Tab.FILES && vm.currentCategory != CategoryKind.ALL) {
-                          if (vm.isScanning && vm.categoryItems.isEmpty()) {
-                              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                  Text("正在扫描整个设备…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                              }
-                          } else if (vm.categoryItems.isEmpty()) {
-                              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                  Text("未找到" + vm.currentCategory.label + "类文件",
-                                      color = MaterialTheme.colorScheme.onSurfaceVariant)
-                              }
-                          } else {
-                              FileList(vm.categoryItems, vm.starredPaths, onOpen = onOpenItem,
-                                  onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
-                          }
-                      } else {
-                          PullToRefreshBox(isRefreshing = vm.isRefreshing, onRefresh = { vm.pullToRefresh() },
-                              modifier = Modifier.fillMaxSize()) {
-                              when (vm.currentTab) {
-                                  Tab.FILES -> {
-                                      if (vm.items.isEmpty()) {
-                                          EmptyStateList(if (vm.searchQuery.isNotBlank()) "没有匹配项" else "这个文件夹是空的",
-                                              if (vm.searchQuery.isNotBlank()) "试试其他关键词" else "下拉刷新，或点击右下角 + 新建")
-                                      } else FileList(vm.items, vm.starredPaths, onOpen = onOpenItem,
-                                          onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
-                                  }
-                                  Tab.RECENT -> {
-                                      if (vm.recentItems.isEmpty()) EmptyStateList("暂无最近文件", "打开过的文件会出现在这里")
-                                      else FileList(vm.recentItems, vm.starredPaths, onOpen = onOpenItem,
-                                          onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
-                                  }
-                                  Tab.STARRED -> {
-                                      if (vm.starredItems.isEmpty()) EmptyStateList("暂无收藏", "在菜单中点击收藏即可加入")
-                                      else FileList(vm.starredItems, vm.starredPaths, onOpen = onOpenItem,
-                                          onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
-                                  }
-                                  Tab.SETTINGS -> {}
-                              }
-                          }
-                      }
-                      FloatingNavBar(items = navItems, selectedIndex = vm.currentTab.ordinal,
-                          onSelect = { vm.currentTab = Tab.values()[it] },
-                          modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
-                  }
-              }
-
-              if (vm.globalSearchMode) GlobalSearchScreen(vm = vm, onDismiss = { vm.exitGlobalSearch() })
-
-              val p = previewItem
-              if (p != null) FullScreenPreview(item = p, vm = vm, onDismiss = { vm.recordRecent(p); previewItem = null })
-
-              when (val s = sheet) {
-                  is UiSheet.ItemMenu -> {
-                      val item = s.item
-                      ActionSheet(title = item.name, subtitle = item.subtitle, actions = buildList {
-                          add(SheetAction(
-                              if (item.isDirectory) Icons.Filled.FolderOpen
-                              else if (item.kind == FileKind.APK) Icons.Filled.Android
-                              else if (item.kind == FileKind.EXECUTABLE) Icons.Filled.Terminal
-                              else Icons.Filled.InsertDriveFile,
-                              when {
-                                  item.isDirectory -> "打开"
-                                  item.kind == FileKind.APK -> "安装"
-                                  item.kind == FileKind.EXECUTABLE -> "运行"
-                                  item.kind == FileKind.VIDEO -> "播放"
-                                  item.kind == FileKind.AUDIO -> "播放"
-                                  else -> "打开"
-                              }) {
-                              when {
-                                  item.isDirectory -> vm.open(item)
-                                  item.kind == FileKind.APK -> { openFileWithSystem(ctx, item); vm.recordRecent(item) }
-                                  item.kind == FileKind.EXECUTABLE -> { openFileWithSystem(ctx, item); vm.recordRecent(item) }
-                                  else -> previewItem = item
-                              }
-                          })
-                          if (!item.isDirectory && item.kind != FileKind.APK && item.kind != FileKind.EXECUTABLE) {
-                              add(SheetAction(Icons.Filled.FolderOpen, "用其他应用打开") { openFileWithSystem(ctx, item); vm.recordRecent(item) })
-                          }
-                          add(SheetAction(if (vm.isStarred(item.path)) Icons.Filled.Star else Icons.Filled.StarBorder,
-                              if (vm.isStarred(item.path)) "取消收藏" else "收藏") { vm.toggleStar(item) })
-                          add(SheetAction(Icons.Filled.Edit, "重命名") { dialog = UiDialog.Rename(item) })
-                          add(SheetAction(Icons.Filled.ContentCopy, "复制") { vm.copy(item) })
-                          add(SheetAction(Icons.Filled.ContentCut, "剪切") { vm.cut(item) })
-                          if (item.isDirectory) add(SheetAction(Icons.Filled.ContentPaste, "粘贴到此处",
-                              enabled = vm.clipboard != null) { vm.pasteInto(item.file) })
-                          add(SheetAction(Icons.Filled.Delete, "删除", destructive = true) { dialog = UiDialog.Delete(item) })
-                      }, onDismiss = { sheet = null })
-                  }
-                  UiSheet.NewMenu -> {
-                      ActionSheet(title = "新建", actions = buildList {
-                          add(SheetAction(Icons.Filled.CreateNewFolder, "新建文件夹") { dialog = UiDialog.NewFolder })
-                          add(SheetAction(Icons.Filled.InsertDriveFile, "新建文件") { dialog = UiDialog.NewFile })
-                          if (vm.clipboard != null) add(SheetAction(Icons.Filled.ContentPaste, "粘贴到此处") { vm.pasteInto() })
-                      }, onDismiss = { sheet = null })
-                  }
-                  null -> Unit
-              }
-
-              when (val d = dialog) {
-                  UiDialog.NewFolder -> TextInputDialog(title = "新建文件夹", initial = "新建文件夹",
-                      onConfirm = { vm.createFolder(it) }, onDismiss = { dialog = null })
-                  UiDialog.NewFile -> TextInputDialog(title = "新建文件", initial = "新建文件.txt",
-                      onConfirm = { vm.createFile(it) }, onDismiss = { dialog = null })
-                  is UiDialog.Rename -> TextInputDialog(title = "重命名", initial = d.item.name,
-                      onConfirm = { vm.rename(d.item, it) }, onDismiss = { dialog = null })
-                  is UiDialog.Delete -> ConfirmDialog(title = "删除「" + d.item.name + "」？",
-                      message = if (d.item.isDirectory) "该文件夹及其中所有内容都将被删除，此操作不可撤销。" else "此操作不可撤销。",
-                      confirmText = "删除", destructive = true,
-                      onConfirm = { vm.delete(d.item) }, onDismiss = { dialog = null })
-                  null -> Unit
-              }
-          }
-
-          @Composable
-          fun EmptyStateList(title: String, subtitle: String) {
-              LazyColumn(Modifier.fillMaxSize()) {
-                  item {
-                      Column(Modifier.fillParentMaxSize().padding(bottom = 120.dp),
-                          horizontalAlignment = Alignment.CenterHorizontally,
-                          verticalArrangement = Arrangement.Center) {
-                          Icon(Icons.Filled.Folder, null, modifier = Modifier.size(64.dp),
-                              tint = MaterialTheme.colorScheme.outlineVariant)
-                          Spacer(Modifier.height(16.dp))
-                          Text(title, style = MaterialTheme.typography.titleMedium)
-                          Spacer(Modifier.height(4.dp))
-                          Text(subtitle, style = MaterialTheme.typography.bodyMedium,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant)
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          fun SettingsScreen(vm: FileManagerViewModel) {
-              val ctx = LocalContext.current
-              val activity = ctx as? Activity
-              val refreshRates = remember { activity?.let { supportedRefreshRates(it) } ?: listOf(60f) }
-
-              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                  .padding(horizontal = 16.dp).padding(bottom = 120.dp)) {
-
-                  Spacer(Modifier.height(8.dp))
-                  Text("外观", style = MaterialTheme.typography.labelMedium,
-                      color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
-                      modifier = Modifier.padding(vertical = 8.dp))
-
-                  Text("界面风格", style = MaterialTheme.typography.bodyLarge)
-                  Spacer(Modifier.height(8.dp))
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      listOf(UiStyle.MATERIAL_YOU to "Material You",
-                          UiStyle.MI_MINIX to "小米 Minix").forEach { pair ->
-                          val (style, label) = pair
-                          val selected = vm.uiStyle == style
-                          Surface(
-                              onClick = { vm.updateUiStyle(style) },
-                              shape = RoundedCornerShape(20.dp),
-                              color = if (selected) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.surface,
-                              border = BorderStroke(1.dp,
-                                  if (selected) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.outline)
-                          ) {
-                              Text(label, style = MaterialTheme.typography.labelMedium,
-                                  color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
-                                      else MaterialTheme.colorScheme.onSurface,
-                                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                          }
-                      }
-                  }
-                  Spacer(Modifier.height(4.dp))
-                  Text("两种风格都使用 Android 12+ 系统动态取色（随壁纸变化）",
-                      style = MaterialTheme.typography.labelSmall,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-                  Spacer(Modifier.height(20.dp))
-                  Text("屏幕刷新率", style = MaterialTheme.typography.bodyLarge)
-                  Text("从系统支持的刷新率中选择", style = MaterialTheme.typography.labelMedium,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant)
-                  Spacer(Modifier.height(8.dp))
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      refreshRates.forEach { hz ->
-                          val label = hz.toInt().toString() + "Hz"
-                          val selected = kotlin.math.abs(vm.preferredHz - hz) < 1f
-                          Surface(
-                              onClick = {
-                                  vm.updatePreferredHz(hz)
-                                  activity?.let { a -> applyRefreshRate(a, hz) }
-                              },
-                              shape = RoundedCornerShape(20.dp),
-                              color = if (selected) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.surface,
-                              border = BorderStroke(1.dp,
-                                  if (selected) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.outline)
-                          ) {
-                              Text(label, style = MaterialTheme.typography.labelMedium,
-                                  color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
-                                      else MaterialTheme.colorScheme.onSurface,
-                                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                          }
-                      }
-                  }
-
-                  Spacer(Modifier.height(20.dp))
-                  Text("浏览", style = MaterialTheme.typography.labelMedium,
-                      color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
-                      modifier = Modifier.padding(vertical = 8.dp))
-                  Row(Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                      verticalAlignment = Alignment.CenterVertically) {
-                      Column(Modifier.weight(1f)) {
-                          Text("显示隐藏文件", style = MaterialTheme.typography.bodyLarge)
-                          Text("以 . 开头的文件与文件夹", style = MaterialTheme.typography.labelMedium,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant)
-                      }
-                      Switch(checked = vm.showHidden, onCheckedChange = vm::updateShowHidden)
-                  }
-                  Spacer(Modifier.height(12.dp))
-                  Text("默认视图", style = MaterialTheme.typography.bodyLarge)
-                  Spacer(Modifier.height(8.dp))
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      listOf("列表" to false, "网格" to true).forEach { pair ->
-                          val (label, v) = pair
-                          Surface(onClick = { vm.updateGrid(v) }, shape = RoundedCornerShape(20.dp),
-                              color = if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.surface,
-                              border = BorderStroke(1.dp,
-                                  if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.outline)) {
-                              Text(label, style = MaterialTheme.typography.labelMedium,
-                                  color = if (vm.gridMode == v) MaterialTheme.colorScheme.onSecondaryContainer
-                                      else MaterialTheme.colorScheme.onSurface,
-                                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                          }
-                      }
-                  }
-                  Spacer(Modifier.height(20.dp))
-                  Text("排序方式", style = MaterialTheme.typography.bodyLarge)
-                  Spacer(Modifier.height(8.dp))
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      listOf("名称" to SortKey.NAME, "大小" to SortKey.SIZE, "时间" to SortKey.MTIME).forEach { pair ->
-                          val (label, v) = pair
-                          Surface(onClick = { vm.updateSort(v) }, shape = RoundedCornerShape(20.dp),
-                              color = if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.surface,
-                              border = BorderStroke(1.dp,
-                                  if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
-                                  else MaterialTheme.colorScheme.outline)) {
-                              Text(label, style = MaterialTheme.typography.labelMedium,
-                                  color = if (vm.sortKey == v) MaterialTheme.colorScheme.onSecondaryContainer
-                                      else MaterialTheme.colorScheme.onSurface,
-                                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                          }
-                      }
-                  }
-
-                  Spacer(Modifier.height(24.dp))
-                  Text("关于", style = MaterialTheme.typography.labelMedium,
-                      color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
-                      modifier = Modifier.padding(vertical = 8.dp))
-                  Surface(color = MaterialTheme.colorScheme.surfaceContainerLow,
-                      shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
-                      Column(Modifier.padding(16.dp)) {
-                          Text("Files · MD3  v3.3", style = MaterialTheme.typography.bodyMedium,
-                              fontWeight = FontWeight.Medium)
-                          Spacer(Modifier.height(4.dp))
-                          Text("Minix 动态取色 · Zip 完整编辑 · 全屏播放器",
-                              style = MaterialTheme.typography.labelSmall,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant)
-                      }
-                  }
-              }
-          }
-
-          class MainActivity : ComponentActivity() {
-              private val prefs by lazy { getSharedPreferences("fm_md3", 0) }
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  enableEdgeToEdge()
-                  val savedHz = prefs.getFloat("preferredHz", 0f)
-                  window.decorView.post {
-                      if (savedHz > 0f) applyRefreshRate(this, savedHz)
-                  }
-                  val savedStyle = runCatching {
-                      UiStyle.valueOf(prefs.getString("uiStyle", "MATERIAL_YOU") ?: "MATERIAL_YOU")
-                  }.getOrDefault(UiStyle.MATERIAL_YOU)
-                  setContent {
-                      MD3Theme(savedStyle) {
-                          val vm: FileManagerViewModel = viewModel()
-                          // 让 UI 响应风格切换
-                          MD3Theme(vm.uiStyle) {
-                              FileManagerScreen(vm)
-                          }
-                      }
-                  }
-              }
-          }
-          KOTLIN_EOF
-
-      - name: Build Release APK
-        run: gradle assembleRelease --no-daemon --stacktrace
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: app/build/outputs/apk/release/app-release.apk
-          retention-days: 30
+                  Surface(onClick = onDismiss, shape = R
