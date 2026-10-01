@@ -82,8 +82,8 @@ jobs:
                   applicationId = "com.example.filemanagermd3"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 15
-                  versionName = "2.8"
+                  versionCode = 19
+                  versionName = "3.3"
               }
 
               buildTypes {
@@ -147,6 +147,7 @@ jobs:
                   android:theme="@style/Theme.FileManagerMD3">
                   <activity
                       android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density"
                       android:exported="true"
                       android:theme="@style/Theme.FileManagerMD3">
                       <intent-filter>
@@ -233,6 +234,7 @@ jobs:
           import android.app.Application
           import android.content.Context
           import android.content.Intent
+          import android.content.res.Configuration
           import android.graphics.Bitmap
           import android.graphics.BitmapFactory
           import android.media.MediaPlayer
@@ -245,10 +247,12 @@ jobs:
           import android.widget.Toast
           import android.widget.VideoView
           import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
           import androidx.activity.compose.rememberLauncherForActivityResult
           import androidx.activity.compose.setContent
           import androidx.activity.enableEdgeToEdge
           import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.BorderStroke
           import androidx.compose.foundation.ExperimentalFoundationApi
           import androidx.compose.foundation.Image
           import androidx.compose.foundation.background
@@ -271,9 +275,11 @@ jobs:
           import androidx.compose.foundation.layout.statusBarsPadding
           import androidx.compose.foundation.layout.width
           import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
           import androidx.compose.foundation.lazy.grid.GridCells
           import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
           import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.foundation.text.BasicTextField
           import androidx.compose.foundation.text.KeyboardActions
@@ -343,9 +349,11 @@ jobs:
           import androidx.compose.material3.pulltorefresh.PullToRefreshBox
           import androidx.compose.material3.rememberModalBottomSheetState
           import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.CompositionLocalProvider
           import androidx.compose.runtime.DisposableEffect
           import androidx.compose.runtime.Immutable
           import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.compositionLocalOf
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.key
           import androidx.compose.runtime.mutableIntStateOf
@@ -356,12 +364,14 @@ jobs:
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.graphics.SolidColor
           import androidx.compose.ui.graphics.asImageBitmap
           import androidx.compose.ui.graphics.vector.ImageVector
           import androidx.compose.ui.layout.ContentScale
           import androidx.compose.ui.platform.LocalClipboardManager
+          import androidx.compose.ui.platform.LocalConfiguration
           import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.platform.LocalLifecycleOwner
           import androidx.compose.ui.text.AnnotatedString
@@ -373,6 +383,8 @@ jobs:
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.compose.ui.window.Dialog
+          import androidx.compose.ui.window.DialogProperties
           import androidx.core.content.FileProvider
           import androidx.lifecycle.AndroidViewModel
           import androidx.lifecycle.Lifecycle
@@ -390,7 +402,17 @@ jobs:
           import java.time.format.DateTimeFormatter
           import java.util.Locale
           import java.util.concurrent.ConcurrentHashMap
+          import java.util.zip.ZipEntry
           import java.util.zip.ZipFile
+          import java.util.zip.ZipInputStream
+          import java.util.zip.ZipOutputStream
+
+          // ============================================================
+          // 主题风格
+          // ============================================================
+          enum class UiStyle { MATERIAL_YOU, MI_MINIX }
+
+          val LocalUiStyle = compositionLocalOf { UiStyle.MATERIAL_YOU }
 
           private val LightColors = lightColorScheme(
               primary = Color(0xFF6750A4), onPrimary = Color.White,
@@ -421,9 +443,11 @@ jobs:
           )
 
           @Composable
-          fun MD3Theme(content: @Composable () -> Unit) {
+          fun MD3Theme(uiStyle: UiStyle, content: @Composable () -> Unit) {
               val dark = isSystemInDarkTheme()
               val context = LocalContext.current
+              // 两个风格都使用 Material You 动态取色（Android 12+），降级到预设
+              // 视觉差异（Minix 的圆角/底栏样式/间距）由 LocalUiStyle 在 UI 层处理
               val colorScheme = remember(dark) {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                       if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
@@ -431,71 +455,112 @@ jobs:
                       if (dark) DarkColors else LightColors
                   }
               }
-              MaterialTheme(colorScheme = colorScheme, content = content)
+              CompositionLocalProvider(LocalUiStyle provides uiStyle) {
+                  MaterialTheme(colorScheme = colorScheme, content = content)
+              }
           }
 
+          // ============================================================
+          // 文件类型
+          // ============================================================
           enum class FileKind {
               FOLDER, IMAGE, VIDEO, AUDIO, ARCHIVE, CODE, PDF, DOCUMENT,
               APK, FONT, DATABASE, DISK_IMAGE, TORRENT, EXECUTABLE, FILE
           }
 
+          enum class CategoryKind(val label: String) {
+              ALL("全部"), AUDIO("音频"), VIDEO("视频"), TEXT("文本"),
+              ARCHIVE("压缩包"), IMAGE("图片"), DOCUMENT("文档"), APK("安装包");
+
+              fun matches(item: FileItem): Boolean = when (this) {
+                  ALL -> true
+                  AUDIO -> item.kind == FileKind.AUDIO
+                  VIDEO -> item.kind == FileKind.VIDEO
+                  TEXT -> item.kind == FileKind.CODE
+                  ARCHIVE -> item.kind == FileKind.ARCHIVE
+                  IMAGE -> item.kind == FileKind.IMAGE
+                  DOCUMENT -> item.kind == FileKind.DOCUMENT || item.kind == FileKind.PDF
+                  APK -> item.kind == FileKind.APK
+              }
+          }
+
           private val IMAGE_EXTS = setOf(
-              "jpg","jpeg","png","gif","webp","bmp","svg","ico","heic","heif","avif",
-              "tif","tiff","raw","dng","cr2","nef","arw","orf","rw2","pef","sr2","insp",
-              "psd","xcf","ai","sketch","fig","indd","cdr","karbon","jpe","jfif","jif"
+              "jpg","jpeg","jpe","jfif","jif","png","gif","webp","bmp","svg","svgz","ico","heic","heif","avif",
+              "tif","tiff","raw","dng","cr2","cr3","nef","arw","orf","rw2","pef","sr2","insp","raf",
+              "psd","psb","xcf","ai","eps","sketch","fig","indd","cdr","karbon","jp2","jpf","jpx","j2k","j2c","jpc",
+              "dds","exr","hdr","tga","pcx","ppm","pgm","pbm","pnm","xbm","xpm","dib","rle","wbmp"
           )
           private val VIDEO_EXTS = setOf(
-              "mp4","mkv","mov","avi","webm","flv","m4v","wmv","3gp","3g2",
-              "ts","m2ts","mts","vob","rmvb","rm","asf","f4v","ogv","divx","xvid","mpeg","mpg","mpe",
-              "m3u8","dvr-ms","wtv","bik","smk","roq","y4m","viv","dv",
-              "h264","h265","hevc","av1","vp9","vp8","m2v","m1v","m4s","m2p","m2t",
-              "amv","nsv","ogm","ogx","3gpp","3gpp2"
+              "mp4","m4v","mkv","mov","avi","webm","flv","f4v","wmv","asf","3gp","3g2","3gpp","3gpp2",
+              "ts","m2ts","mts","m2t","m2p","m2v","vob","ifo","rmvb","rm","ogv","ogm","ogx","divx","xvid",
+              "mpeg","mpg","mpe","m1v","mpv","mp2v","mpev","m3u8","dvr-ms","wtv","bik","smk","roq","y4m","viv","dv",
+              "h264","264","h265","265","hevc","av1","vp9","vp8","amv","nsv","fli","flc"
           )
           private val AUDIO_EXTS = setOf(
-              "mp3","wav","flac","aac","ogg","m4a","wma","opus","amr","ape",
-              "aiff","aif","aifc","mid","midi","ac3","dts","mka","weba","ra","cda","m4b","m4p","oga",
-              "mod","s3m","xm","it","kar","sf2","sf3","snd","au","voc","8svx","msv","mmf",
-              "dsf","dff","tak","tta","wv","spx","caf","ec3","eac3","mlp","thd",
-              "aa","aax","m4r","rip","oma","at3","at9","aa3","vqf"
+              "mp3","wav","wave","flac","aac","m4a","m4b","m4p","m4r","ogg","oga","opus","wma","asf",
+              "aiff","aif","aifc","ape","mpc","wv","tta","tak","dsf","dff","amr","awb","ac3","eac3","dts","thd","mlp",
+              "mka","weba","ra","rm","cda","mid","midi","kar","sf2","sf3","mod","s3m","xm","it","spx","caf",
+              "aa","aax","oma","at3","at9","aa3","vqf","ac4","adts","aob","rip","snd","au","voc","8svx","msv","mmf"
           )
           private val ARCHIVE_EXTS = setOf(
-              "zip","rar","7z","tar","gz","bz2","xz","iso","jar",
-              "lzh","cab","tgz","tbz2","tbz","z","zst","lz4","lzma","cpio",
-              "arj","lha","ace","zoo","arc","pak","wim","esd","sit","sitx","sea","hqx"
+              "zip","zipx","rar","7z","tar","gz","tgz","bz2","tbz2","tbz","xz","txz","lzma","zst","lz4","lzo","lz",
+              "iso","jar","war","ear","lzh","lha","cab","arj","ace","zoo","arc","pak","wim","esd",
+              "sit","sitx","sea","hqx","cpio","br","xar","zpaq"
           )
-          private val APK_EXTS = setOf("apk","apks","xapk","apkm")
+          private val APK_EXTS = setOf("apk","apks","xapk","apkm","aab")
           private val DOCUMENT_EXTS = setOf(
-              "doc","docx","xls","xlsx","ppt","pptx","odt","ods","odp","rtf",
-              "pages","numbers","key","epub","mobi","azw","azw3","fb2","djvu","cbr","cbz",
-              "azw4","lit","pdb","prc","snb","tr2","tr3","oxps","xps","chm",
-              "wpd","wps","et","dps","dot","dotx","xlt","xltx","pot","potx"
+              "doc","docx","docm","dot","dotx","dotm","rtf","odt","ott","fodt","wpd","wps","abw","zabw",
+              "xls","xlsx","xlsm","xlsb","xlt","xltx","xltm","ods","ots","fods","et","ett","numbers",
+              "ppt","pptx","pptm","pot","potx","potm","pps","ppsx","ppsm","odp","otp","fodp","dps","dpt","key",
+              "pdf","xps","oxps","epub","mobi","azw","azw3","azw4","lit","pdb","prc","fb2","fb3","djvu","djv","cbr","cbz","cb7","cbt",
+              "pages","snb","tr2","tr3","chm","hlp","uof","uot","uos","uop","ofd","caj","kdh","nh","hdbook",
+              "sxc","stc","sxi","sti","sxd","std","sxg","stw","sxw","sdw","sda","sdd","smf","vor","dbk"
           )
           private val FONT_EXTS = setOf(
-              "ttf","otf","ttc","woff","woff2","eot","fon","fnt","pfb","pfm","afm","dfont","suit"
+              "ttf","otf","ttc","otc","woff","woff2","eot","fon","fnt","pfb","pfm","afm","dfont","suit",
+              "bdf","pcf","pfa","gsf","mrf"
           )
           private val DATABASE_EXTS = setOf(
-              "sqlite","sqlite3","db","db3","mdb","accdb","realm","sdf","frm","myd","myi","ibd","sqlitedb"
+              "sqlite","sqlite3","sqlitedb","db","db3","mdb","accdb","realm","sdf","frm","myd","myi","ibd",
+              "dbf","ldf","bak","sqlite-wal","sqlite-shm"
           )
           private val DISK_IMAGE_EXTS = setOf(
-              "img","dmg","vhd","vhdx","vmdk","vdi","qcow","qcow2","sparseimage","toast","nrg","mdf","ccd"
+              "dmg","vhd","vhdx","vmdk","vdi","qcow","qcow2","sparseimage","toast","nrg","mdf","ccd",
+              "vcd","cue","udf","partimg","dd","img","e01","ex01"
           )
-          private val TORRENT_EXTS = setOf("torrent")
+          private val TORRENT_EXTS = setOf("torrent","magnet")
           private val EXECUTABLE_EXTS = setOf(
-              "exe","msi","deb","rpm","pkg","ipa","appx","msix","snp","appimage","run"
+              "exe","msi","msp","msu","com","scr","pif","deb","rpm","pkg","mpkg","app","ipa","appx","appxbundle",
+              "msix","msixbundle","snp","appimage","run","bin","elf","so","dll","dylib","ko","o","obj","class"
           )
           private val CODE_EXTS = setOf(
-              "txt","log","md","markdown","rst","tex","rmd","srt","vtt","ass","ssa","sub","idx",
-              "json","json5","jsonc","xml","yml","yaml","toml","ini","conf","cfg","properties","env","editorconfig",
-              "js","mjs","cjs","ts","tsx","jsx","vue","svelte","astro",
-              "html","htm","xhtml","css","scss","sass","less","styl","pcss",
-              "kt","kts","java","scala","groovy","gradle","clj","cljs","cljc","edn",
-              "py","pyw","pyi","rb","rbw","php","pl","pm","t","pod",
-              "c","cpp","cc","cxx","h","hpp","hxx","cs","swift","m","mm","go","rs","dart","lua","r","jl",
-              "sh","bash","zsh","fish","bat","cmd","ps1","psm1","vbs","vbe","wsf","awk","sed",
-              "sql","graphql","gql","hql","pgsql","plsql",
-              "dockerfile","gitignore","gitattributes","gitmodules","npmignore","lock","sum",
-              "makefile","mk","cmake","vcxproj","sln","pbxproj","xcodeproj",
-              "csv","tsv","diff","patch","hgignore","hgrc","bzrignore"
+              "txt","text","log","md","markdown","mdown","mkd","rst","tex","latex","rmd","srt","vtt","ass","ssa","sub","idx","smi","sami","ttml",
+              "json","json5","jsonc","geojson","ndjson","jsonl","jsonld",
+              "xml","xsd","xsl","xslt","plist","pom","wsdl",
+              "yml","yaml","toml","ini","conf","cfg","config","properties","env","editorconfig","prefs","settings","pref",
+              "js","mjs","cjs","jsx","ts","tsx","mts","cts","vue","svelte","astro",
+              "html","htm","xhtml","xht","shtml","css","scss","sass","less","styl","stylus","pcss","postcss",
+              "kt","kts","java","scala","sc","groovy","gradle","clj","cljs","cljc","cljx","edn","dats","sats","ats",
+              "py","pyw","pyi","pyx","pxd","pxi","ipynb",
+              "rb","rbw","rake","gemspec","ru","podspec",
+              "php","phtml","php3","php4","php5","php7","phps",
+              "pl","pm","pod","t","cgi","psgi",
+              "c","h","cpp","cxx","cc","hpp","hxx","inl","ipp","tpp",
+              "cs","csx","swift","m","mm","metal",
+              "go","rs","dart","lua","r","jl","nim","zig","v","cr","d","f","f90","f95","f03","for",
+              "sh","bash","zsh","fish","ksh","csh","tcsh","bat","cmd","ps1","psm1","psd1","vbs","vbe","wsf","wsh",
+              "awk","sed","gawk","mawk","nawk",
+              "sql","plsql","tsql","pgsql","mysql","hql","cql","psql",
+              "graphql","gql","graphqls",
+              "dockerfile","containerfile","gitignore","gitattributes","gitmodules","gitconfig","npmignore","npmrc","yarnrc",
+              "lock","sum","tmpl","tpl","hbs","handlebars","mustache","ejs","pug","jade","haml","slim","liquid",
+              "makefile","mk","mak","cmake","ninja","meson","bazel","bzl","gn","gni",
+              "vcxproj","sln","csproj","fsproj","vbproj","props","targets",
+              "pbxproj","xcconfig","xcodeproj","xcworkspace","storyboard","xib","nib",
+              "csv","tsv","psv","dsv",
+              "diff","patch","rej","orig",
+              "hgignore","hgrc","bzrignore","cvsignore",
+              "readme","license","authors","contributors","changelog","changes","install","news","todo","notice"
           )
 
           private val EXT_TO_KIND: Map<String, FileKind> = buildMap {
@@ -607,20 +672,46 @@ jobs:
 
           fun mimeOf(extension: String): String {
               return when (extension) {
-                  "apk", "apks", "xapk", "apkm" -> "application/vnd.android.package-archive"
+                  "apk", "apks", "xapk", "apkm", "aab" -> "application/vnd.android.package-archive"
                   "ipa" -> "application/octet-stream"
                   "dmg" -> "application/x-apple-diskimage"
                   "vhd", "vhdx" -> "application/x-vhd"
                   "vmdk" -> "application/x-vmdk"
                   "vdi" -> "application/x-virtualbox-vdi"
+                  "qcow", "qcow2" -> "application/x-qemu-disk"
                   "torrent" -> "application/x-bittorrent"
-                  "ttf", "otf", "ttc" -> "font/*"
-                  "woff", "woff2" -> "font/woff"
+                  "magnet" -> "application/x-magnet"
+                  "ttf", "otf", "ttc", "otc" -> "font/*"
+                  "woff" -> "font/woff"
+                  "woff2" -> "font/woff2"
+                  "eot" -> "application/vnd.ms-fontobject"
                   "sqlite", "sqlite3", "sqlitedb" -> "application/x-sqlite3"
                   "mdb", "accdb" -> "application/x-msaccess"
-                  "exe", "msi" -> "application/x-msdownload"
+                  "dbf" -> "application/x-dbf"
+                  "exe", "com", "scr", "pif" -> "application/x-msdownload"
+                  "msi", "msp", "msu" -> "application/x-msi"
                   "deb" -> "application/vnd.debian.binary-package"
                   "rpm" -> "application/x-rpm"
+                  "iso" -> "application/x-iso9660-image"
+                  "jar" -> "application/java-archive"
+                  "war", "ear" -> "application/java-archive"
+                  "class" -> "application/java-vm"
+                  "psd", "psb" -> "image/vnd.adobe.photoshop"
+                  "ai", "eps" -> "application/postscript"
+                  "xcf" -> "image/x-xcf"
+                  "epub" -> "application/epub+zip"
+                  "mobi" -> "application/x-mobipocket-ebook"
+                  "azw", "azw3", "azw4" -> "application/vnd.amazon.ebook"
+                  "fb2", "fb3" -> "application/x-fictionbook+xml"
+                  "djvu", "djv" -> "image/vnd.djvu"
+                  "cbr" -> "application/x-cbr"
+                  "cbz" -> "application/x-cbz"
+                  "chm" -> "application/vnd.ms-htmlhelp"
+                  "xps", "oxps" -> "application/oxps"
+                  "caj" -> "application/caj"
+                  "pages" -> "application/x-iwork-pages-sffpages"
+                  "numbers" -> "application/x-iwork-numbers-sffnumbers"
+                  "key" -> "application/x-iwork-keynote-sffkey"
                   else -> {
                       val m = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
                       m ?: "*/*"
@@ -646,64 +737,291 @@ jobs:
               }
           }
 
-          fun applyHighRefreshRate(activity: Activity, enabled: Boolean) {
+          fun applyRefreshRate(activity: Activity, targetHz: Float) {
               try {
                   val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) activity.display
                       else @Suppress("DEPRECATION") activity.windowManager.defaultDisplay
                   if (display == null) return
                   val modes = display.supportedModes ?: return
-                  val target = if (enabled) modes.maxByOrNull { it.refreshRate }
-                      else modes.minByOrNull { it.refreshRate }
-                  if (target == null) return
+                  if (modes.isEmpty()) return
+                  val target = modes.minByOrNull { kotlin.math.abs(it.refreshRate - targetHz) } ?: return
                   val attrs = activity.window.attributes
                   attrs.preferredDisplayModeId = target.modeId
                   activity.window.attributes = attrs
               } catch (_: Exception) {}
           }
 
+          fun supportedRefreshRates(activity: Activity): List<Float> {
+              return try {
+                  val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) activity.display
+                      else @Suppress("DEPRECATION") activity.windowManager.defaultDisplay
+                  val modes = display?.supportedModes ?: return listOf(60f)
+                  modes.map { it.refreshRate }.distinct().sortedDescending()
+              } catch (_: Exception) { listOf(60f) }
+          }
+
+          // ============================================================
+          // Zip 编辑器（流式重建）
+          // ============================================================
+          object ZipEditor {
+              private const val BUF_SIZE = 16 * 1024
+
+              /** 删除条目：entriesToRemove 精确匹配；prefixToRemove 若不为 null 则删除以此开头的所有条目 */
+              fun removeEntries(zipFile: File, entriesToRemove: Set<String>, prefixToRemove: String?): Boolean {
+                  return rebuild(zipFile) { name, zin, zout ->
+                      val shouldRemove = entriesToRemove.contains(name) ||
+                          (prefixToRemove != null && (name == prefixToRemove || name.startsWith(prefixToRemove)))
+                      !shouldRemove
+                  }
+              }
+
+              /** 重命名条目（支持目录：会同时重命名目录下的所有条目） */
+              fun renameEntry(zipFile: File, oldName: String, newName: String, isDirectory: Boolean): Boolean {
+                  return rebuild(zipFile) { name, _, _ ->
+                      if (isDirectory) {
+                          // 目录重命名：oldName 是目录（末尾带 /），把前缀替换
+                          if (name == oldName || name.startsWith(oldName)) {
+                              // 转换后返回 true，但需要重写条目名
+                          } else true
+                      } else {
+                          name != oldName
+                      }
+                  }.let { _ ->
+                      // 上面只是占位，实际执行下面真正的重命名逻辑
+                      renameImpl(zipFile, oldName, newName, isDirectory)
+                  }
+              }
+
+              private fun renameImpl(zipFile: File, oldName: String, newName: String, isDirectory: Boolean): Boolean {
+                  val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
+                  return try {
+                      ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
+                          ZipOutputStream(tmp.outputStream().buffered()).use { zout ->
+                              val buffer = ByteArray(BUF_SIZE)
+                              var entry = zin.nextEntry
+                              while (entry != null) {
+                                  val name = entry.name
+                                  val renamed = if (isDirectory) {
+                                      if (name == oldName || name.startsWith(oldName)) {
+                                          newName + name.removePrefix(oldName)
+                                      } else name
+                                  } else {
+                                      if (name == oldName) newName else name
+                                  }
+                                  val newEntry = ZipEntry(renamed).apply {
+                                      if (entry.time != -1L) time = entry.time
+                                  }
+                                  zout.putNextEntry(newEntry)
+                                  var len: Int
+                                  while (zin.read(buffer).also { len = it } > 0) {
+                                      zout.write(buffer, 0, len)
+                                  }
+                                  zout.closeEntry()
+                                  zin.closeEntry()
+                                  entry = zin.nextEntry
+                              }
+                          }
+                      }
+                      replaceOriginal(zipFile, tmp)
+                  } catch (e: Exception) {
+                      try { tmp.delete() } catch (_: Exception) {}
+                      false
+                  }
+              }
+
+              /** 添加空文件夹（末尾带 / 的 ZipEntry） */
+              fun addEmptyFolder(zipFile: File, folderPath: String): Boolean {
+                  val normalized = if (folderPath.endsWith("/")) folderPath else "$folderPath/"
+                  val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
+                  return try {
+                      var exists = false
+                      ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
+                          ZipOutputStream(tmp.outputStream().buffered()).use { zout ->
+                              val buffer = ByteArray(BUF_SIZE)
+                              var entry = zin.nextEntry
+                              while (entry != null) {
+                                  val name = entry.name
+                                  if (name == normalized) exists = true
+                                  val newEntry = ZipEntry(name).apply {
+                                      if (entry.time != -1L) time = entry.time
+                                  }
+                                  zout.putNextEntry(newEntry)
+                                  var len: Int
+                                  while (zin.read(buffer).also { len = it } > 0) {
+                                      zout.write(buffer, 0, len)
+                                  }
+                                  zout.closeEntry()
+                                  zin.closeEntry()
+                                  entry = zin.nextEntry
+                              }
+                              if (!exists) {
+                                  val newEntry = ZipEntry(normalized).apply { time = System.currentTimeMillis() }
+                                  zout.putNextEntry(newEntry)
+                                  zout.closeEntry()
+                              }
+                          }
+                      }
+                      replaceOriginal(zipFile, tmp)
+                  } catch (e: Exception) {
+                      try { tmp.delete() } catch (_: Exception) {}
+                      false
+                  }
+              }
+
+              /** 添加一组文件（innerPath -> sourceFile） */
+              fun addFiles(zipFile: File, additions: List<Pair<String, File>>): Boolean {
+                  if (additions.isEmpty()) return false
+                  val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
+                  return try {
+                      val existing = HashSet<String>()
+                      ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
+                          ZipOutputStream(tmp.outputStream().buffered()).use { zout ->
+                              val buffer = ByteArray(BUF_SIZE)
+                              var entry = zin.nextEntry
+                              while (entry != null) {
+                                  val name = entry.name
+                                  existing.add(name)
+                                  val newEntry = ZipEntry(name).apply {
+                                      if (entry.time != -1L) time = entry.time
+                                  }
+                                  zout.putNextEntry(newEntry)
+                                  var len: Int
+                                  while (zin.read(buffer).also { len = it } > 0) {
+                                      zout.write(buffer, 0, len)
+                                  }
+                                  zout.closeEntry()
+                                  zin.closeEntry()
+                                  entry = zin.nextEntry
+                              }
+                              for ((inner, src) in additions) {
+                                  if (inner in existing) continue
+                                  if (src.isDirectory) continue
+                                  val newEntry = ZipEntry(inner).apply { time = System.currentTimeMillis() }
+                                  zout.putNextEntry(newEntry)
+                                  src.inputStream().buffered().use { input ->
+                                      var len: Int
+                                      while (input.read(buffer).also { len = it } > 0) {
+                                          zout.write(buffer, 0, len)
+                                      }
+                                  }
+                                  zout.closeEntry()
+                              }
+                          }
+                      }
+                      replaceOriginal(zipFile, tmp)
+                  } catch (e: Exception) {
+                      try { tmp.delete() } catch (_: Exception) {}
+                      false
+                  }
+              }
+
+              private inline fun rebuild(
+                  zipFile: File,
+                  keep: (String, ZipInputStream, ZipOutputStream) -> Boolean
+              ): Boolean {
+                  val tmp = File(zipFile.parentFile, zipFile.name + ".tmp_" + System.currentTimeMillis())
+                  return try {
+                      ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
+                          ZipOutputStream(tmp.outputStream().buffered()).use { zout ->
+                              val buffer = ByteArray(BUF_SIZE)
+                              var entry = zin.nextEntry
+                              while (entry != null) {
+                                  val name = entry.name
+                                  if (keep(name, zin, zout)) {
+                                      val newEntry = ZipEntry(name).apply {
+                                          if (entry.time != -1L) time = entry.time
+                                      }
+                                      zout.putNextEntry(newEntry)
+                                      var len: Int
+                                      while (zin.read(buffer).also { len = it } > 0) {
+                                          zout.write(buffer, 0, len)
+                                      }
+                                      zout.closeEntry()
+                                  }
+                                  zin.closeEntry()
+                                  entry = zin.nextEntry
+                              }
+                          }
+                      }
+                      replaceOriginal(zipFile, tmp)
+                  } catch (e: Exception) {
+                      try { tmp.delete() } catch (_: Exception) {}
+                      false
+                  }
+              }
+
+              private fun replaceOriginal(zipFile: File, tmp: File): Boolean {
+                  if (tmp.length() <= 0L) { tmp.delete(); return false }
+                  val backup = File(zipFile.parentFile, zipFile.name + ".bak_" + System.currentTimeMillis())
+                  return if (zipFile.renameTo(backup)) {
+                      if (tmp.renameTo(zipFile)) {
+                          backup.delete()
+                          true
+                      } else {
+                          backup.renameTo(zipFile)
+                          tmp.delete()
+                          false
+                      }
+                  } else {
+                      tmp.delete()
+                      false
+                  }
+              }
+          }
+
+          // ============================================================
+          // ViewModel
+          // ============================================================
           enum class Tab { FILES, RECENT, STARRED, SETTINGS }
           enum class SortKey { NAME, SIZE, MTIME }
           enum class ClipMode { COPY, CUT }
           data class ClipData(val mode: ClipMode, val path: String)
 
           private data class DirSnapshot(
-              val items: List<FileItem>,
-              val dirMtime: Long,
-              val sortKey: SortKey,
-              val showHidden: Boolean
+              val items: List<FileItem>, val dirMtime: Long,
+              val sortKey: SortKey, val showHidden: Boolean
           )
+          private data class ScanSnapshot(val items: List<FileItem>, val timestamp: Long)
 
           class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
               private val prefs = app.getSharedPreferences("fm_md3", 0)
               private var searchJob: Job? = null
               private var refreshJob: Job? = null
+              private var scanJob: Job? = null
               private val dirCache = ConcurrentHashMap<String, DirSnapshot>()
+              private val categoryScanCache = ConcurrentHashMap<CategoryKind, ScanSnapshot>()
               private val maxCacheSize = 20
+              private val maxScanResults = 2000
+              private val scanCacheTTL = 60_000L
 
-              var currentDir by mutableStateOf(resolveRoot(app))
-                  private set
-              var items by mutableStateOf<List<FileItem>>(emptyList())
-                  private set
-              var recentItems by mutableStateOf<List<FileItem>>(emptyList())
-                  private set
-              var starredItems by mutableStateOf<List<FileItem>>(emptyList())
-                  private set
-
+              var currentDir by mutableStateOf(resolveRoot(app)); private set
+              var items by mutableStateOf<List<FileItem>>(emptyList()); private set
+              var recentItems by mutableStateOf<List<FileItem>>(emptyList()); private set
+              var starredItems by mutableStateOf<List<FileItem>>(emptyList()); private set
               var currentTab by mutableStateOf(Tab.FILES)
+              var currentCategory by mutableStateOf(CategoryKind.ALL)
+              var categoryItems by mutableStateOf<List<FileItem>>(emptyList()); private set
+              var isScanning by mutableStateOf(false); private set
               var gridMode by mutableStateOf(prefs.getBoolean("grid", false))
               var sortKey by mutableStateOf(
                   runCatching { SortKey.valueOf(prefs.getString("sort","NAME") ?: "NAME") }.getOrDefault(SortKey.NAME)
               )
               var showHidden by mutableStateOf(prefs.getBoolean("hidden", false))
-              var highRefresh by mutableStateOf(prefs.getBoolean("highRefresh", true))
+              var preferredHz by mutableStateOf(prefs.getFloat("preferredHz", 0f))
+              var uiStyle by mutableStateOf(
+                  runCatching { UiStyle.valueOf(prefs.getString("uiStyle", "MATERIAL_YOU") ?: "MATERIAL_YOU") }
+                      .getOrDefault(UiStyle.MATERIAL_YOU)
+              )
               var searchQuery by mutableStateOf("")
               var searchMode by mutableStateOf(false)
+              var globalSearchQuery by mutableStateOf("")
+              var globalSearchMode by mutableStateOf(false)
+              var globalSearchResults by mutableStateOf<List<FileItem>>(emptyList()); private set
+              var isSearching by mutableStateOf(false); private set
               var clipboard by mutableStateOf<ClipData?>(null)
-              var starredPaths by mutableStateOf(prefs.getStringSet("starred", emptySet()) ?: emptySet())
-                  private set
+              var starredPaths by mutableStateOf(prefs.getStringSet("starred", emptySet()) ?: emptySet()); private set
               var snackMessage by mutableStateOf<String?>(null)
-              var isRefreshing by mutableStateOf(false)
-                  private set
+              var isRefreshing by mutableStateOf(false); private set
 
               init {
                   val lastDir = prefs.getString("lastDir", null)
@@ -711,9 +1029,7 @@ jobs:
                       val f = File(lastDir)
                       if (f.exists() && f.isDirectory && f.canRead()) currentDir = f
                   }
-                  refresh(force = false)
-                  refreshRecent()
-                  refreshStarred()
+                  refresh(force = false); refreshRecent(); refreshStarred()
               }
 
               private fun resolveRoot(app: Application): File {
@@ -738,11 +1054,9 @@ jobs:
                   val currentSort = sortKey
                   val currentHidden = showHidden
                   val cached = dirCache[dirPath]
-
                   if (!force && cached != null && cached.sortKey == currentSort && cached.showHidden == currentHidden) {
                       items = cached.items
                   }
-
                   refreshJob = viewModelScope.launch {
                       val nowMtime = withContext(Dispatchers.IO) {
                           try { dir.lastModified() } catch (e: Exception) { 0L }
@@ -788,9 +1102,93 @@ jobs:
                   }
               }
 
+              fun selectCategory(cat: CategoryKind) {
+                  currentCategory = cat
+                  if (cat == CategoryKind.ALL) { categoryItems = emptyList(); return }
+                  val cached = categoryScanCache[cat]
+                  val now = System.currentTimeMillis()
+                  if (cached != null && now - cached.timestamp < scanCacheTTL) {
+                      categoryItems = sortList(cached.items, sortKey); return
+                  }
+                  scanCategory(cat)
+              }
+
+              fun scanCategory(cat: CategoryKind) {
+                  scanJob?.cancel()
+                  scanJob = viewModelScope.launch {
+                      isScanning = true
+                      try {
+                          val root = resolveRoot(getApplication())
+                          val currentSort = sortKey
+                          val result = withContext(Dispatchers.IO) {
+                              scanByCategory(root, cat, maxScanResults, currentSort)
+                          }
+                          if (cat == currentCategory) {
+                              categoryScanCache[cat] = ScanSnapshot(result, System.currentTimeMillis())
+                              categoryItems = result
+                          }
+                      } finally { isScanning = false }
+                  }
+              }
+
+              fun globalSearch(q: String) {
+                  globalSearchQuery = q
+                  searchJob?.cancel()
+                  if (q.isBlank()) { globalSearchResults = emptyList(); return }
+                  searchJob = viewModelScope.launch {
+                      isSearching = true
+                      try {
+                          delay(300)
+                          val root = resolveRoot(getApplication())
+                          val currentSort = sortKey
+                          val result = withContext(Dispatchers.IO) {
+                              searchGlobal(root, q, maxScanResults, currentSort)
+                          }
+                          if (q == globalSearchQuery) globalSearchResults = result
+                      } finally { isSearching = false }
+                  }
+              }
+
+              fun exitGlobalSearch() {
+                  globalSearchQuery = ""
+                  globalSearchResults = emptyList()
+                  globalSearchMode = false
+              }
+
+              private fun scanByCategory(root: File, cat: CategoryKind, max: Int, key: SortKey): List<FileItem> {
+                  val res = ArrayList<FileItem>(64)
+                  val stack = ArrayDeque<File>(); stack.add(root)
+                  while (stack.isNotEmpty() && res.size < max) {
+                      val dir = stack.removeFirst()
+                      val children = try { dir.listFiles() } catch (_: Exception) { null } ?: continue
+                      for (c in children) {
+                          if (c.name.startsWith(".")) continue
+                          if (c.isDirectory) stack.add(c)
+                          else { val item = c.toItem(); if (cat.matches(item)) res.add(item) }
+                      }
+                  }
+                  return sortList(res, key)
+              }
+
+              private fun searchGlobal(root: File, q: String, max: Int, key: SortKey): List<FileItem> {
+                  if (q.isBlank()) return emptyList()
+                  val lower = q.lowercase()
+                  val res = ArrayList<FileItem>(64)
+                  val stack = ArrayDeque<File>(); stack.add(root)
+                  while (stack.isNotEmpty() && res.size < max) {
+                      val dir = stack.removeFirst()
+                      val children = try { dir.listFiles() } catch (_: Exception) { null } ?: continue
+                      for (c in children) {
+                          if (c.name.startsWith(".")) continue
+                          if (c.name.lowercase().contains(lower)) res.add(c.toItem())
+                          if (c.isDirectory) stack.add(c)
+                      }
+                  }
+                  return sortList(res, key)
+              }
+
               private fun invalidateAndRefresh() {
-                  dirCache.remove(currentDir.absolutePath)
-                  refresh(force = true)
+                  dirCache.remove(currentDir.absolutePath); refresh(force = true)
               }
 
               fun refreshRecent() {
@@ -822,18 +1220,14 @@ jobs:
               fun open(item: FileItem) {
                   if (!item.isDirectory) return
                   if (!item.file.canRead()) { showSnack("无法访问"); return }
-                  currentDir = item.file
-                  searchQuery = ""
-                  searchMode = false
+                  currentDir = item.file; searchQuery = ""; searchMode = false
                   prefs.edit().putString("lastDir", item.path).apply()
                   refresh(force = false)
               }
 
               fun navigateTo(dir: File) {
                   if (!dir.isDirectory || !dir.canRead()) { showSnack("无法访问"); return }
-                  currentDir = dir
-                  searchQuery = ""
-                  searchMode = false
+                  currentDir = dir; searchQuery = ""; searchMode = false
                   prefs.edit().putString("lastDir", dir.absolutePath).apply()
                   refresh(force = false)
               }
@@ -841,8 +1235,7 @@ jobs:
               fun goUp(): Boolean {
                   val p = currentDir.parentFile ?: return false
                   if (!p.canRead()) return false
-                  navigateTo(p)
-                  return true
+                  navigateTo(p); return true
               }
 
               fun breadcrumbs(): List<File> {
@@ -984,9 +1377,15 @@ jobs:
               fun isStarred(path: String) = starredPaths.contains(path)
 
               fun updateGrid(g: Boolean) { gridMode = g; prefs.edit().putBoolean("grid", g).apply() }
-              fun updateSort(k: SortKey) { sortKey = k; prefs.edit().putString("sort", k.name).apply(); dirCache.clear(); refresh(force = true) }
+              fun updateSort(k: SortKey) {
+                  sortKey = k; prefs.edit().putString("sort", k.name).apply()
+                  dirCache.clear(); categoryScanCache.clear()
+                  refresh(force = true)
+                  if (currentCategory != CategoryKind.ALL) scanCategory(currentCategory)
+              }
               fun updateShowHidden(s: Boolean) { showHidden = s; prefs.edit().putBoolean("hidden", s).apply(); dirCache.clear(); refresh(force = true) }
-              fun updateHighRefresh(b: Boolean) { highRefresh = b; prefs.edit().putBoolean("highRefresh", b).apply() }
+              fun updatePreferredHz(hz: Float) { preferredHz = hz; prefs.edit().putFloat("preferredHz", hz).apply() }
+              fun updateUiStyle(style: UiStyle) { uiStyle = style; prefs.edit().putString("uiStyle", style.name).apply() }
 
               suspend fun saveTextFile(item: FileItem, content: String): Boolean {
                   val ok = withContext(Dispatchers.IO) {
@@ -1000,9 +1399,8 @@ jobs:
                   return try {
                       cacheDir.mkdirs()
                       val baseName = entryName.substringAfterLast('/')
-                      if (baseName.isEmpty()) {
-                          null
-                      } else {
+                      if (baseName.isEmpty()) null
+                      else {
                           val outFile = File(cacheDir, baseName)
                           var result: File? = null
                           ZipFile(zipFile).use { zip ->
@@ -1046,10 +1444,76 @@ jobs:
                   return count
               }
 
+              fun extractZipSubset(zipFile: File, targetDir: File, prefixPath: String): Int {
+                  var count = 0
+                  try {
+                      val basePath = targetDir.canonicalPath
+                      val prefix = basePath + File.separator
+                      ZipFile(zipFile).use { zip ->
+                          val entries = zip.entries()
+                          while (entries.hasMoreElements()) {
+                              val entry = entries.nextElement()
+                              if (prefixPath.isNotEmpty() && !(entry.name == prefixPath || entry.name.startsWith(prefixPath))) continue
+                              val relative = if (prefixPath.isEmpty()) entry.name
+                                  else entry.name.removePrefix(prefixPath)
+                              if (relative.isEmpty()) continue
+                              val outFile = File(targetDir, relative)
+                              val canon = outFile.canonicalPath
+                              if (canon == basePath || canon.startsWith(prefix)) {
+                                  if (entry.isDirectory) outFile.mkdirs()
+                                  else {
+                                      outFile.parentFile?.mkdirs()
+                                      zip.getInputStream(entry).use { input ->
+                                          outFile.outputStream().use { output -> input.copyTo(output) }
+                                      }
+                                      count++
+                                  }
+                              }
+                          }
+                      }
+                  } catch (_: Exception) {}
+                  return count
+              }
+
+              // ---- Zip 编辑 ----
+              fun zipDeleteEntry(zipFile: File, entryName: String, isDirectory: Boolean): Boolean {
+                  val ok = if (isDirectory) ZipEditor.removeEntries(zipFile, emptySet(), entryName)
+                      else ZipEditor.removeEntries(zipFile, setOf(entryName), null)
+                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  return ok
+              }
+
+              fun zipRenameEntry(zipFile: File, oldName: String, newName: String, isDirectory: Boolean): Boolean {
+                  val ok = ZipEditor.renameEntry(zipFile, oldName, newName, isDirectory)
+                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  return ok
+              }
+
+              fun zipAddFolder(zipFile: File, folderPath: String): Boolean {
+                  val ok = ZipEditor.addEmptyFolder(zipFile, folderPath)
+                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  return ok
+              }
+
+              fun zipAddFile(zipFile: File, srcFile: File, innerName: String): Boolean {
+                  val ok = ZipEditor.addFiles(zipFile, listOf(innerName to srcFile))
+                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  return ok
+              }
+
+              fun zipAddMultiple(zipFile: File, additions: List<Pair<String, File>>): Boolean {
+                  val ok = ZipEditor.addFiles(zipFile, additions)
+                  if (ok) { refresh(force = true); if (currentCategory == CategoryKind.ARCHIVE) scanCategory(currentCategory) }
+                  return ok
+              }
+
               fun showSnack(m: String) { snackMessage = m }
               fun consumeSnack() { snackMessage = null }
           }
 
+          // ============================================================
+          // 图标 / 颜色
+          // ============================================================
           private fun badgeColors(kind: FileKind, cs: ColorScheme): Pair<Color, Color> = when (kind) {
               FileKind.FOLDER -> cs.primaryContainer to cs.onPrimaryContainer
               FileKind.IMAGE -> cs.tertiaryContainer to cs.onTertiaryContainer
@@ -1156,34 +1620,86 @@ jobs:
               }
           }
 
+          @Composable
+          fun CategoryBar(selected: CategoryKind, onSelect: (CategoryKind) -> Unit) {
+              val all = listOf(
+                  CategoryKind.ALL, CategoryKind.AUDIO, CategoryKind.VIDEO, CategoryKind.TEXT,
+                  CategoryKind.ARCHIVE, CategoryKind.IMAGE, CategoryKind.DOCUMENT, CategoryKind.APK
+              )
+              LazyRow(
+                  modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  items(count = all.size, key = { all[it].name }) { idx ->
+                      val cat = all[idx]
+                      val sel = cat == selected
+                      Surface(
+                          onClick = { onSelect(cat) },
+                          shape = RoundedCornerShape(20.dp),
+                          color = if (sel) MaterialTheme.colorScheme.secondaryContainer
+                              else MaterialTheme.colorScheme.surface,
+                          border = BorderStroke(1.dp,
+                              if (sel) MaterialTheme.colorScheme.secondaryContainer
+                              else MaterialTheme.colorScheme.outlineVariant)
+                      ) {
+                          Text(cat.label, style = MaterialTheme.typography.labelMedium,
+                              color = if (sel) MaterialTheme.colorScheme.onSecondaryContainer
+                                  else MaterialTheme.colorScheme.onSurfaceVariant,
+                              modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
+                      }
+                  }
+              }
+          }
+
           @Immutable
           data class NavEntry(val icon: ImageVector, val label: String)
 
           @Composable
           fun FloatingNavBar(items: List<NavEntry>, selectedIndex: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
-              val containerColor = MaterialTheme.colorScheme.surfaceContainer
-              val activeBg = MaterialTheme.colorScheme.secondaryContainer
-              val activeFg = MaterialTheme.colorScheme.onSecondaryContainer
-              val inactiveFg = MaterialTheme.colorScheme.onSurfaceVariant
-              val labelActive = MaterialTheme.colorScheme.onSurface
-              val labelInactive = MaterialTheme.colorScheme.onSurfaceVariant
-              Surface(modifier = modifier, shape = RoundedCornerShape(28.dp), color = containerColor,
-                  tonalElevation = 3.dp, shadowElevation = 8.dp) {
+              val uiStyle = LocalUiStyle.current
+              val cs = MaterialTheme.colorScheme
+              // Minix: 白底、圆角 24、无 tonal；Material You: surfaceContainer、圆角 28、tonalElevation 3
+              val containerColor = if (uiStyle == UiStyle.MI_MINIX) cs.surface else cs.surfaceContainer
+              val activeBg = if (uiStyle == UiStyle.MI_MINIX) cs.primary.copy(alpha = 0.14f)
+                  else cs.secondaryContainer
+              val activeFg = if (uiStyle == UiStyle.MI_MINIX) cs.primary else cs.onSecondaryContainer
+              val inactiveFg = cs.onSurfaceVariant
+              val labelActive = if (uiStyle == UiStyle.MI_MINIX) cs.primary else cs.onSurface
+              val labelInactive = cs.onSurfaceVariant
+              val shape = if (uiStyle == UiStyle.MI_MINIX) RoundedCornerShape(24.dp) else RoundedCornerShape(28.dp)
+
+              Surface(
+                  modifier = modifier,
+                  shape = shape,
+                  color = containerColor,
+                  tonalElevation = if (uiStyle == UiStyle.MI_MINIX) 0.dp else 3.dp,
+                  shadowElevation = if (uiStyle == UiStyle.MI_MINIX) 4.dp else 8.dp
+              ) {
                   Row(Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
                       horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
                       items.forEachIndexed { i, it ->
                           val sel = i == selectedIndex
-                          Column(modifier = Modifier.clip(RoundedCornerShape(20.dp)).clickable { onSelect(i) }
-                              .padding(horizontal = 4.dp, vertical = 4.dp),
-                              horizontalAlignment = Alignment.CenterHorizontally) {
-                              Box(modifier = Modifier.width(if (sel) 60.dp else 44.dp).height(30.dp)
-                                  .clip(RoundedCornerShape(15.dp))
-                                  .background(if (sel) activeBg else Color.Transparent),
-                                  contentAlignment = Alignment.Center) {
-                                  Icon(it.icon, it.label, tint = if (sel) activeFg else inactiveFg, modifier = Modifier.size(22.dp))
+                          Column(
+                              modifier = Modifier.clip(RoundedCornerShape(20.dp))
+                                  .clickable { onSelect(i) }
+                                  .padding(horizontal = 4.dp, vertical = 4.dp),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              Box(
+                                  modifier = Modifier
+                                      .width(if (sel) 60.dp else 44.dp)
+                                      .height(30.dp)
+                                      .clip(RoundedCornerShape(15.dp))
+                                      .background(if (sel) activeBg else Color.Transparent),
+                                  contentAlignment = Alignment.Center
+                              ) {
+                                  Icon(it.icon, it.label,
+                                      tint = if (sel) activeFg else inactiveFg,
+                                      modifier = Modifier.size(22.dp))
                               }
                               Spacer(Modifier.height(2.dp))
-                              Text(it.label, style = MaterialTheme.typography.labelSmall, color = if (sel) labelActive else labelInactive)
+                              Text(it.label, style = MaterialTheme.typography.labelSmall,
+                                  color = if (sel) labelActive else labelInactive)
                           }
                       }
                   }
@@ -1253,30 +1769,191 @@ jobs:
           }
 
           // ============================================================
-          // 媒体播放器（含生命周期暂停）
+          // 全屏预览容器
           // ============================================================
           @Composable
-          fun VideoPlayerView(path: String) {
+          fun FullScreenPreview(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
+              Dialog(
+                  onDismissRequest = onDismiss,
+                  properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+              ) {
+                  Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                      when (item.kind) {
+                          FileKind.CODE -> key(item.path) { TextEditorScreen(item, vm, onDismiss) }
+                          FileKind.IMAGE -> key(item.path) { ImageViewerScreen(item, onDismiss) }
+                          FileKind.VIDEO -> key(item.path) { VideoPlayerScreen(item, vm, onDismiss) }
+                          FileKind.AUDIO -> key(item.path) { AudioPlayerScreen(item, vm, onDismiss) }
+                          FileKind.ARCHIVE -> key(item.path) { ArchiveBrowserScreen(item, vm, onDismiss) }
+                          else -> key(item.path) { UnsupportedScreen(item, onDismiss) }
+                      }
+                  }
+              }
+          }
+
+          // ============================================================
+          // 全屏文本编辑器
+          // ============================================================
+          @Composable
+          fun TextEditorScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
+              val scope = rememberCoroutineScope()
+              val clipboard = LocalClipboardManager.current
+              var loading by remember { mutableStateOf(true) }
+              var text by remember { mutableStateOf("") }
+              var editing by remember { mutableStateOf(false) }
+              var errorMsg by remember { mutableStateOf<String?>(null) }
+
+              LaunchedEffect(item.path) {
+                  val (loaded, err) = withContext(Dispatchers.IO) {
+                      try {
+                          if (item.size > 8_000_000L) Pair<String?, String?>(null, "文件过大（" + humanSize(item.size) + "），无法内联编辑")
+                          else Pair(item.file.readText(), null)
+                      } catch (e: Exception) { Pair<String?, String?>(null, "读取失败：" + (e.message ?: "")) }
+                  }
+                  if (loaded != null) text = loaded
+                  errorMsg = err
+                  loading = false
+              }
+
+              BackHandler { onDismiss() }
+
+              Column(Modifier.fillMaxSize()) {
+                  Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth().statusBarsPadding()
+                              .height(64.dp).padding(horizontal = 4.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          IconButton(onClick = onDismiss) { Icon(Icons.Filled.ArrowBack, "返回") }
+                          Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                              Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                              Text(item.subtitle, style = MaterialTheme.typography.labelSmall,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+                          if (!loading && errorMsg == null) {
+                              IconButton(onClick = { clipboard.setText(AnnotatedString(text)) }) {
+                                  Icon(Icons.Filled.ContentCopy, "复制全部")
+                              }
+                              IconButton(onClick = { editing = !editing }) {
+                                  Icon(Icons.Filled.Edit, if (editing) "预览" else "编辑")
+                              }
+                              if (editing) {
+                                  IconButton(onClick = {
+                                      scope.launch {
+                                          val ok = vm.saveTextFile(item, text)
+                                          if (ok) { vm.showSnack("已保存"); editing = false }
+                                          else vm.showSnack("保存失败")
+                                      }
+                                  }) { Icon(Icons.Filled.Save, "保存") }
+                              }
+                          }
+                      }
+                  }
+                  Box(Modifier.fillMaxSize()) {
+                      when {
+                          loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                              Text("正在加载…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          }
+                          errorMsg != null -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                              Text(errorMsg ?: "", color = MaterialTheme.colorScheme.error)
+                          }
+                          editing -> BasicTextField(
+                              value = text, onValueChange = { text = it },
+                              modifier = Modifier.fillMaxSize()
+                                  .padding(horizontal = 16.dp, vertical = 12.dp)
+                                  .navigationBarsPadding(),
+                              textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 14.sp,
+                                  lineHeight = 22.sp, color = MaterialTheme.colorScheme.onSurface),
+                              cursorBrush = SolidColor(MaterialTheme.colorScheme.primary)
+                          )
+                          else -> SelectionContainer {
+                              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                                  .padding(horizontal = 16.dp, vertical = 12.dp).navigationBarsPadding()) {
+                                  Text(text, fontFamily = FontFamily.Monospace, fontSize = 14.sp,
+                                      lineHeight = 22.sp, color = MaterialTheme.colorScheme.onSurface)
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ============================================================
+          // 全屏图片查看器
+          // ============================================================
+          @Composable
+          fun ImageViewerScreen(item: FileItem, onDismiss: () -> Unit) {
+              var bitmap by remember { mutableStateOf<Bitmap?>(null) }
+              var errorMsg by remember { mutableStateOf<String?>(null) }
+
+              LaunchedEffect(item.path) {
+                  val (bmp, err) = withContext(Dispatchers.IO) {
+                      try {
+                          val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                          BitmapFactory.decodeFile(item.path, opts)
+                          var sample = 1
+                          while (opts.outWidth / sample > 3072 || opts.outHeight / sample > 3072) sample *= 2
+                          val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+                          val b = BitmapFactory.decodeFile(item.path, decodeOpts)
+                          Pair(b, if (b == null) "无法解码图片" else null)
+                      } catch (e: Exception) { Pair<Bitmap?, String?>(null, "读取失败：" + (e.message ?: "")) }
+                  }
+                  bitmap = bmp; errorMsg = err
+              }
+
+              BackHandler { onDismiss() }
+
+              Box(Modifier.fillMaxSize().background(Color.Black)) {
+                  val b = bitmap
+                  if (b != null) {
+                      Image(bitmap = b.asImageBitmap(), contentDescription = item.name,
+                          modifier = Modifier.fillMaxSize().padding(8.dp), contentScale = ContentScale.Fit)
+                  } else if (errorMsg != null) {
+                      Text(errorMsg ?: "", color = Color.White, modifier = Modifier.align(Alignment.Center))
+                  } else {
+                      Text("正在加载…", color = Color.White, modifier = Modifier.align(Alignment.Center))
+                  }
+                  IconButton(onClick = onDismiss,
+                      modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(8.dp)) {
+                      Icon(Icons.Filled.Close, "关闭", tint = Color.White)
+                  }
+                  Surface(
+                      modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding(),
+                      color = Color.Black.copy(alpha = 0.5f)
+                  ) {
+                      Column(Modifier.padding(16.dp)) {
+                          Text(item.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          Spacer(Modifier.height(4.dp))
+                          Text(item.subtitle, color = Color.White.copy(alpha = 0.7f),
+                              style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      }
+                  }
+              }
+          }
+
+          // ============================================================
+          // 全屏视频播放器
+          // ============================================================
+          @Composable
+          fun VideoPlayerScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
               val lifecycleOwner = LocalLifecycleOwner.current
+              val configuration = LocalConfiguration.current
               var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
               var isPlaying by remember { mutableStateOf(false) }
               var duration by remember { mutableIntStateOf(0) }
               var position by remember { mutableIntStateOf(0) }
+              var controlsVisible by remember { mutableStateOf(true) }
+              var errorMsg by remember { mutableStateOf<String?>(null) }
 
-              DisposableEffect(lifecycleOwner, path) {
+              DisposableEffect(lifecycleOwner, item.path) {
                   val observer = LifecycleEventObserver { _, event ->
                       if (event == Lifecycle.Event.ON_PAUSE) {
-                          try {
-                              videoViewRef?.let { if (it.isPlaying) { it.pause(); isPlaying = false } }
-                          } catch (_: Exception) {}
+                          try { videoViewRef?.let { if (it.isPlaying) { it.pause(); isPlaying = false } } } catch (_: Exception) {}
                       }
                   }
                   lifecycleOwner.lifecycle.addObserver(observer)
                   onDispose {
                       lifecycleOwner.lifecycle.removeObserver(observer)
-                      try {
-                          videoViewRef?.let { if (it.isPlaying) it.stopPlayback() }
-                      } catch (_: Exception) {}
+                      try { videoViewRef?.let { if (it.isPlaying) it.stopPlayback() } } catch (_: Exception) {}
                       videoViewRef = null
                   }
               }
@@ -1288,91 +1965,115 @@ jobs:
                   }
               }
 
-              Column(Modifier.fillMaxWidth()) {
+              BackHandler { onDismiss() }
+
+              Box(Modifier.fillMaxSize().background(Color.Black)) {
                   AndroidView(
                       factory = { ctx ->
                           VideoView(ctx).apply {
-                              setVideoPath(path)
-                              setOnPreparedListener { mp ->
-                                  duration = mp.duration
-                                  start()
-                                  isPlaying = true
-                              }
+                              setVideoPath(item.path)
+                              setOnPreparedListener { mp -> duration = mp.duration; start(); isPlaying = true }
                               setOnCompletionListener { isPlaying = false }
-                              setOnErrorListener { _, _, _ -> isPlaying = false; true }
+                              setOnErrorListener { _, _, _ -> errorMsg = "无法播放此视频"; isPlaying = false; true }
                           }
                       },
                       update = { view -> videoViewRef = view },
-                      modifier = Modifier.fillMaxWidth().height(280.dp).background(Color.Black)
+                      modifier = Modifier.fillMaxSize().clickable { controlsVisible = !controlsVisible }
                   )
-                  Spacer(Modifier.height(12.dp))
-                  Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                      verticalAlignment = Alignment.CenterVertically) {
-                      IconButton(onClick = {
-                          val v = videoViewRef ?: return@IconButton
-                          try {
-                              if (v.isPlaying) { v.pause(); isPlaying = false }
-                              else { v.start(); isPlaying = true }
-                          } catch (_: Exception) {}
-                      }) {
-                          Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, "播放/暂停")
+
+                  if (errorMsg != null) {
+                      Text(errorMsg ?: "", color = Color.White, modifier = Modifier.align(Alignment.Center))
+                  }
+
+                  if (controlsVisible) {
+                      Surface(
+                          modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding(),
+                          color = Color.Black.copy(alpha = 0.4f)
+                      ) {
+                          Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
+                              verticalAlignment = Alignment.CenterVertically) {
+                              IconButton(onClick = onDismiss) { Icon(Icons.Filled.ArrowBack, "返回", tint = Color.White) }
+                              Column(Modifier.weight(1f)) {
+                                  Text(item.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                              }
+                              if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                                  Text("横屏", color = Color.White.copy(alpha = 0.7f),
+                                      style = MaterialTheme.typography.labelSmall)
+                              }
+                          }
                       }
-                      Text(text = fmtTime(position), style = MaterialTheme.typography.labelMedium)
-                      Slider(
-                          value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
-                          onValueChange = { frac ->
-                              val v = videoViewRef ?: return@Slider
-                              try { v.seekTo((frac * duration).toInt()) } catch (_: Exception) {}
-                          },
-                          modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
-                      )
-                      Text(text = fmtTime(duration), style = MaterialTheme.typography.labelMedium)
+                      Surface(
+                          modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding(),
+                          color = Color.Black.copy(alpha = 0.4f)
+                      ) {
+                          Column(Modifier.padding(12.dp)) {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Text(fmtTime(position), color = Color.White, style = MaterialTheme.typography.labelSmall)
+                                  Slider(
+                                      value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
+                                      onValueChange = { frac ->
+                                          val v = videoViewRef ?: return@Slider
+                                          try { v.seekTo((frac * duration).toInt()) } catch (_: Exception) {}
+                                      },
+                                      modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                                  )
+                                  Text(fmtTime(duration), color = Color.White, style = MaterialTheme.typography.labelSmall)
+                              }
+                              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                                  IconButton(onClick = {
+                                      val v = videoViewRef ?: return@IconButton
+                                      try {
+                                          if (v.isPlaying) { v.pause(); isPlaying = false }
+                                          else { v.start(); isPlaying = true }
+                                      } catch (_: Exception) {}
+                                  }, modifier = Modifier.size(56.dp)) {
+                                      Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                          "播放/暂停", tint = Color.White, modifier = Modifier.size(36.dp))
+                                  }
+                              }
+                          }
+                      }
                   }
               }
           }
 
+          // ============================================================
+          // 全屏音频播放器
+          // ============================================================
           @Composable
-          fun AudioPlayerView(path: String) {
+          fun AudioPlayerScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
               val lifecycleOwner = LocalLifecycleOwner.current
+              val cs = MaterialTheme.colorScheme
               var player by remember { mutableStateOf<MediaPlayer?>(null) }
               var isPlaying by remember { mutableStateOf(false) }
               var duration by remember { mutableIntStateOf(0) }
               var position by remember { mutableIntStateOf(0) }
-              var error by remember { mutableStateOf<String?>(null) }
+              var errorMsg by remember { mutableStateOf<String?>(null) }
+              var prepared by remember { mutableStateOf(false) }
 
-              DisposableEffect(lifecycleOwner, path) {
+              DisposableEffect(lifecycleOwner, item.path) {
                   val mp = MediaPlayer()
                   try {
-                      mp.setDataSource(path)
-                      mp.setOnPreparedListener { prepared ->
-                          duration = prepared.duration
-                          player = prepared
-                      }
+                      mp.setDataSource(item.path)
+                      mp.setOnPreparedListener { p -> duration = p.duration; player = p; prepared = true }
                       mp.setOnCompletionListener { isPlaying = false }
-                      mp.setOnErrorListener { _, _, _ -> error = "播放失败"; true }
+                      mp.setOnErrorListener { _, _, _ -> errorMsg = "播放失败"; true }
                       mp.prepareAsync()
                   } catch (e: Exception) {
-                      error = e.message ?: "无法播放"
+                      errorMsg = e.message ?: "无法播放"
                       try { mp.release() } catch (_: Exception) {}
                   }
-
                   val observer = LifecycleEventObserver { _, event ->
                       if (event == Lifecycle.Event.ON_PAUSE) {
-                          try {
-                              if (mp.isPlaying) { mp.pause(); isPlaying = false }
-                          } catch (_: Exception) {}
+                          try { if (mp.isPlaying) { mp.pause(); isPlaying = false } } catch (_: Exception) {}
                       }
                   }
                   lifecycleOwner.lifecycle.addObserver(observer)
-
                   onDispose {
                       lifecycleOwner.lifecycle.removeObserver(observer)
                       try {
-                          mp.setOnPreparedListener(null)
-                          mp.setOnCompletionListener(null)
-                          mp.setOnErrorListener(null)
-                          if (mp.isPlaying) mp.stop()
-                          mp.release()
+                          mp.setOnPreparedListener(null); mp.setOnCompletionListener(null); mp.setOnErrorListener(null)
+                          if (mp.isPlaying) mp.stop(); mp.release()
                       } catch (_: Exception) {}
                       player = null
                   }
@@ -1385,45 +2086,544 @@ jobs:
                   }
               }
 
-              Column(Modifier.fillMaxWidth().padding(vertical = 32.dp),
-                  horizontalAlignment = Alignment.CenterHorizontally) {
-                  if (error != null) {
-                      Text("无法播放：" + error, color = MaterialTheme.colorScheme.error)
-                  } else {
-                      Box(Modifier.size(120.dp).clip(RoundedCornerShape(24.dp))
-                          .background(MaterialTheme.colorScheme.primaryContainer),
-                          contentAlignment = Alignment.Center) {
-                          Icon(Icons.Filled.MusicNote, null, modifier = Modifier.size(64.dp),
-                              tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                      }
-                      Spacer(Modifier.height(24.dp))
-                      IconButton(onClick = {
-                          val p = player ?: return@IconButton
-                          try {
-                              if (p.isPlaying) { p.pause(); isPlaying = false }
-                              else { p.start(); isPlaying = true }
-                          } catch (_: Exception) {}
-                      }, modifier = Modifier.size(72.dp)) {
-                          Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                              "播放/暂停", modifier = Modifier.size(48.dp))
-                      }
-                      Spacer(Modifier.height(16.dp))
-                      Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+              BackHandler { onDismiss() }
+
+              val gradient = Brush.verticalGradient(listOf(cs.primaryContainer, cs.background))
+
+              Box(Modifier.fillMaxSize().background(gradient)) {
+                  Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+                      horizontalAlignment = Alignment.CenterHorizontally) {
+                      Row(modifier = Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 8.dp),
                           verticalAlignment = Alignment.CenterVertically) {
-                          Text(fmtTime(position), style = MaterialTheme.typography.labelMedium)
+                          IconButton(onClick = onDismiss) {
+                              Icon(Icons.Filled.ArrowBack, "返回", tint = cs.onPrimaryContainer)
+                          }
+                          Column(Modifier.weight(1f)) {
+                              Text(item.name, color = cs.onPrimaryContainer, maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                              Text(item.subtitle, color = cs.onPrimaryContainer.copy(alpha = 0.7f),
+                                  maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+                          }
+                      }
+                      Spacer(Modifier.weight(1f))
+                      Box(modifier = Modifier.size(240.dp).clip(CircleShape).background(cs.primary),
+                          contentAlignment = Alignment.Center) {
+                          Icon(Icons.Filled.MusicNote, null, modifier = Modifier.size(120.dp), tint = cs.onPrimary)
+                      }
+                      Spacer(Modifier.height(48.dp))
+                      Column(Modifier.fillMaxWidth().padding(horizontal = 32.dp)) {
                           Slider(
                               value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                               onValueChange = { frac ->
                                   val p = player ?: return@Slider
                                   try { p.seekTo((frac * duration).toInt()) } catch (_: Exception) {}
                               },
-                              modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                              enabled = prepared
                           )
-                          Text(fmtTime(duration), style = MaterialTheme.typography.labelMedium)
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                              Text(fmtTime(position), color = cs.onPrimaryContainer, style = MaterialTheme.typography.labelSmall)
+                              Text(fmtTime(duration), color = cs.onPrimaryContainer, style = MaterialTheme.typography.labelSmall)
+                          }
+                      }
+                      Spacer(Modifier.height(16.dp))
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
+                          verticalAlignment = Alignment.CenterVertically) {
+                          IconButton(
+                              onClick = {
+                                  val p = player ?: return@IconButton
+                                  try {
+                                      if (p.isPlaying) { p.pause(); isPlaying = false }
+                                      else { p.start(); isPlaying = true }
+                                  } catch (_: Exception) {}
+                              },
+                              modifier = Modifier.size(96.dp).clip(CircleShape).background(cs.primary),
+                              enabled = prepared
+                          ) {
+                              Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                  "播放/暂停", tint = cs.onPrimary, modifier = Modifier.size(56.dp))
+                          }
+                      }
+                      Spacer(Modifier.weight(1f))
+                      if (errorMsg != null) Text(errorMsg ?: "", color = cs.error, modifier = Modifier.padding(16.dp))
+                      else if (!prepared) Text("正在准备…", color = cs.onPrimaryContainer.copy(alpha = 0.7f),
+                          modifier = Modifier.padding(16.dp))
+                  }
+              }
+          }
+
+          // ============================================================
+          // 全屏压缩包浏览器（子目录 + 完整编辑）
+          // ============================================================
+          @Composable
+          fun ArchiveBrowserScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
+              val context = LocalContext.current
+              val scope = rememberCoroutineScope()
+              var allEntries by remember { mutableStateOf<List<ZipEntryInfo>>(emptyList()) }
+              var currentPath by remember { mutableStateOf("") }
+              var loading by remember { mutableStateOf(true) }
+              var errorMsg by remember { mutableStateOf<String?>(null) }
+              var editTarget by remember { mutableStateOf<ZipEntryInfo?>(null) }
+              var renameTarget by remember { mutableStateOf<ZipEntryInfo?>(null) }
+              var showNewFolder by remember { mutableStateOf(false) }
+              var busy by remember { mutableStateOf(false) }
+              var reloadKey by remember { mutableIntStateOf(0) }
+
+              LaunchedEffect(item.path, reloadKey) {
+                  loading = true
+                  val (list, err) = withContext(Dispatchers.IO) {
+                      if (item.extension != "zip" && item.extension != "jar") {
+                          Pair<List<ZipEntryInfo>, String?>(emptyList(), "暂不支持 ." + item.extension + " 内浏览（当前仅支持 zip/jar）")
+                      } else {
+                          try {
+                              val res = ArrayList<ZipEntryInfo>(256)
+                              ZipFile(item.file).use { zip ->
+                                  val e = zip.entries()
+                                  while (e.hasMoreElements() && res.size < 5000) {
+                                      val en = e.nextElement()
+                                      res.add(ZipEntryInfo(en.name, en.size, en.isDirectory))
+                                  }
+                              }
+                              Pair<List<ZipEntryInfo>, String?>(res, null)
+                          } catch (ex: Exception) {
+                              Pair<List<ZipEntryInfo>, String?>(emptyList(), "读取失败：" + (ex.message ?: ""))
+                          }
+                      }
+                  }
+                  allEntries = list; errorMsg = err; loading = false
+              }
+
+              val displayItems = remember(allEntries, currentPath) {
+                  buildZipDisplayItems(allEntries, currentPath)
+              }
+
+              BackHandler {
+                  if (currentPath.isEmpty()) onDismiss()
+                  else {
+                      val trimmed = currentPath.trimEnd('/')
+                      val idx = trimmed.lastIndexOf('/')
+                      currentPath = if (idx < 0) "" else trimmed.substring(0, idx + 1)
+                  }
+              }
+
+              Column(Modifier.fillMaxSize()) {
+                  Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
+                      Column(Modifier.fillMaxWidth().statusBarsPadding()) {
+                          Row(modifier = Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 4.dp),
+                              verticalAlignment = Alignment.CenterVertically) {
+                              IconButton(onClick = onDismiss) { Icon(Icons.Filled.ArrowBack, "返回") }
+                              Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                                  Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                  Text(
+                                      if (loading) "读取中…"
+                                      else if (busy) "处理中…"
+                                      else "共 " + allEntries.size + " 项 · 当前 " + displayItems.size + " 项",
+                                      style = MaterialTheme.typography.labelSmall,
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                                  )
+                              }
+                              IconButton(onClick = { showNewFolder = true }, enabled = !loading && !busy) {
+                                  Icon(Icons.Filled.CreateNewFolder, "新建文件夹")
+                              }
+                              IconButton(
+                                  onClick = {
+                                      // 粘贴剪贴板文件到 zip 当前目录
+                                      val cb = vm.clipboard
+                                      if (cb == null) { vm.showSnack("请先复制一个文件"); return@IconButton }
+                                      val src = File(cb.path)
+                                      if (!src.exists()) { vm.showSnack("源文件不存在"); return@IconButton }
+                                      val inner = currentPath + src.name
+                                      scope.launch {
+                                          busy = true
+                                          val ok = withContext(Dispatchers.IO) {
+                                              vm.zipAddFile(item.file, src, inner)
+                                          }
+                                          busy = false
+                                          if (ok) { vm.showSnack("已粘贴到压缩包"); reloadKey++ }
+                                          else vm.showSnack("粘贴失败")
+                                      }
+                                  },
+                                  enabled = !loading && !busy
+                              ) { Icon(Icons.Filled.ContentPaste, "粘贴到此处") }
+                              IconButton(
+                                  onClick = {
+                                      scope.launch {
+                                          busy = true
+                                          val target = item.file.parentFile ?: return@launch
+                                          val count = withContext(Dispatchers.IO) {
+                                              if (currentPath.isEmpty()) vm.extractZipTo(item.file, target)
+                                              else vm.extractZipSubset(item.file, target, currentPath)
+                                          }
+                                          busy = false
+                                          vm.showSnack("已解压 " + count + " 个文件到 " + target.name)
+                                          vm.pullToRefresh()
+                                      }
+                                  },
+                                  enabled = !loading && !busy
+                              ) {
+                                  Icon(Icons.Filled.Save,
+                                      if (currentPath.isEmpty()) "解压全部到当前目录" else "解压此目录到当前目录")
+                              }
+                          }
+
+                          if (currentPath.isNotEmpty()) {
+                              Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                                  .padding(horizontal = 12.dp, vertical = 6.dp),
+                                  verticalAlignment = Alignment.CenterVertically) {
+                                  Surface(onClick = { currentPath = "" }, shape = RoundedCornerShape(16.dp),
+                                      color = MaterialTheme.colorScheme.secondaryContainer) {
+                                      Text("根目录", style = MaterialTheme.typography.labelMedium,
+                                          color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                                  }
+                                  val parts = currentPath.trimEnd('/').split('/')
+                                  var acc = ""
+                                  parts.forEachIndexed { i, p ->
+                                      Icon(Icons.Filled.ChevronRight, null,
+                                          tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
+                                      acc += p + "/"
+                                      val target = acc
+                                      val last = i == parts.lastIndex
+                                      Surface(onClick = { currentPath = target }, shape = RoundedCornerShape(16.dp),
+                                          color = if (last) MaterialTheme.colorScheme.secondaryContainer
+                                              else MaterialTheme.colorScheme.surface) {
+                                          Text(p, style = MaterialTheme.typography.labelMedium,
+                                              color = if (last) MaterialTheme.colorScheme.onSecondaryContainer
+                                                  else MaterialTheme.colorScheme.onSurfaceVariant,
+                                              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  when {
+                      loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                          Text("正在读取…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                      errorMsg != null -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                          Text(errorMsg ?: "", color = MaterialTheme.colorScheme.error)
+                      }
+                      displayItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                          Text("此目录为空", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                      else -> LazyColumn(modifier = Modifier.fillMaxSize(),
+                          contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp)) {
+                          items(count = displayItems.size, key = { idx -> displayItems[idx].name }) { idx ->
+                              val e = displayItems[idx]
+                              Row(
+                                  modifier = Modifier.fillMaxWidth()
+                                      .combinedClickable(
+                                          onClick = {
+                                              if (e.isDirectory) currentPath = e.name
+                                              else scope.launch {
+                                                  val cacheDir = File(context.cacheDir, "zip_extract")
+                                                  val outFile = withContext(Dispatchers.IO) {
+                                                      vm.extractZipEntry(item.file, e.name, cacheDir)
+                                                  }
+                                                  if (outFile == null) {
+                                                      Toast.makeText(context, "无法解压此条目", Toast.LENGTH_SHORT).show()
+                                                      return@launch
+                                                  }
+                                                  val ext = outFile.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                                                  val type = mimeOf(ext)
+                                                  try {
+                                                      val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", outFile)
+                                                      val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                          setDataAndType(uri, type)
+                                                          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                      }
+                                                      context.startActivity(intent)
+                                                  } catch (e3: Exception) {
+                                                      Toast.makeText(context, "无法打开：" + (e3.message ?: ""), Toast.LENGTH_SHORT).show()
+                                                  }
+                                              }
+                                          },
+                                          onLongClick = { editTarget = e }
+                                      )
+                                      .padding(horizontal = 20.dp, vertical = 10.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Icon(if (e.isDirectory) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
+                                      null, modifier = Modifier.size(22.dp),
+                                      tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  Spacer(Modifier.width(12.dp))
+                                  Column(Modifier.weight(1f)) {
+                                      val displayName = if (currentPath.isEmpty()) e.name else e.name.removePrefix(currentPath)
+                                      Text(displayName.trimEnd('/'),
+                                          fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis,
+                                          color = MaterialTheme.colorScheme.onSurface,
+                                          fontWeight = if (e.isDirectory) FontWeight.Medium else FontWeight.Normal)
+                                      if (!e.isDirectory) Text(humanSize(e.size), fontSize = 11.sp,
+                                          color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  }
+                                  if (e.isDirectory) {
+                                      Icon(Icons.Filled.ChevronRight, null,
+                                          tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(20.dp))
+                                  }
+                                  IconButton(onClick = { editTarget = e }) {
+                                      Icon(Icons.Filled.MoreVert, "更多", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // 编辑条目菜单
+              val t = editTarget
+              if (t != null) {
+                  val shortName = t.name.trimEnd('/').substringAfterLast('/')
+                  ActionSheet(
+                      title = shortName,
+                      subtitle = if (t.isDirectory) "压缩包内目录" else humanSize(t.size),
+                      actions = buildList {
+                          if (!t.isDirectory) {
+                              add(SheetAction(Icons.Filled.FolderOpen, "用其他应用打开") {
+                                  scope.launch {
+                                      val cacheDir = File(context.cacheDir, "zip_extract")
+                                      val outFile = withContext(Dispatchers.IO) {
+                                          vm.extractZipEntry(item.file, t.name, cacheDir)
+                                      }
+                                      if (outFile != null) {
+                                          val ext = outFile.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                                          val type = mimeOf(ext)
+                                          try {
+                                              val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", outFile)
+                                              val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                  setDataAndType(uri, type)
+                                                  addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                              }
+                                              context.startActivity(intent)
+                                          } catch (_: Exception) {}
+                                      }
+                                  }
+                              })
+                              add(SheetAction(Icons.Filled.Save, "解压到当前目录") {
+                                  scope.launch {
+                                      busy = true
+                                      val target = item.file.parentFile ?: return@launch
+                                      val count = withContext(Dispatchers.IO) {
+                                          vm.extractZipSubset(item.file, target, t.name)
+                                      }
+                                      busy = false
+                                      vm.showSnack("已解压 " + count + " 个文件")
+                                  }
+                              })
+                          } else {
+                              add(SheetAction(Icons.Filled.Save, "解压此目录到当前目录") {
+                                  scope.launch {
+                                      busy = true
+                                      val target = item.file.parentFile ?: return@launch
+                                      val count = withContext(Dispatchers.IO) {
+                                          vm.extractZipSubset(item.file, target, t.name)
+                                      }
+                                      busy = false
+                                      vm.showSnack("已解压 " + count + " 个文件")
+                                  }
+                              })
+                          }
+                          add(SheetAction(Icons.Filled.Edit, "重命名") { renameTarget = t })
+                          add(SheetAction(Icons.Filled.Delete, "从压缩包删除", destructive = true) {
+                              scope.launch {
+                                  busy = true
+                                  val ok = withContext(Dispatchers.IO) {
+                                      vm.zipDeleteEntry(item.file, t.name, t.isDirectory)
+                                  }
+                                  busy = false
+                                  if (ok) { vm.showSnack("已从压缩包删除"); reloadKey++ }
+                                  else vm.showSnack("删除失败")
+                              }
+                          })
+                      },
+                      onDismiss = { editTarget = null }
+                  )
+              }
+
+              // 重命名对话框
+              val rt = renameTarget
+              if (rt != null) {
+                  val shortName = rt.name.trimEnd('/').substringAfterLast('/')
+                  TextInputDialog(
+                      title = "重命名压缩包内条目",
+                      initial = shortName,
+                      label = "新名称",
+                      onConfirm = { newShort ->
+                          val prefix = rt.name.substringBeforeLast('/', "")
+                          val newName = if (prefix.isEmpty()) {
+                              if (rt.isDirectory) "$newShort/" else newShort
+                          } else {
+                              if (rt.isDirectory) "$prefix/$newShort/" else "$prefix/$newShort"
+                          }
+                          scope.launch {
+                              busy = true
+                              val ok = withContext(Dispatchers.IO) {
+                                  vm.zipRenameEntry(item.file, rt.name, newName, rt.isDirectory)
+                              }
+                              busy = false
+                              if (ok) { vm.showSnack("已重命名"); reloadKey++ }
+                              else vm.showSnack("重命名失败")
+                          }
+                      },
+                      onDismiss = { renameTarget = null }
+                  )
+              }
+
+              // 新建文件夹对话框
+              if (showNewFolder) {
+                  TextInputDialog(
+                      title = "在压缩包内新建文件夹",
+                      initial = "new_folder",
+                      label = "文件夹名",
+                      onConfirm = { name ->
+                          val full = currentPath + name + "/"
+                          scope.launch {
+                              busy = true
+                              val ok = withContext(Dispatchers.IO) {
+                                  vm.zipAddFolder(item.file, full)
+                              }
+                              busy = false
+                              if (ok) { vm.showSnack("已创建文件夹"); reloadKey++ }
+                              else vm.showSnack("创建失败")
+                          }
+                      },
+                      onDismiss = { showNewFolder = false }
+                  )
+              }
+          }
+
+          private fun buildZipDisplayItems(all: List<ZipEntryInfo>, currentPath: String): List<ZipEntryInfo> {
+              if (currentPath.isEmpty()) {
+                  val seenDirs = HashSet<String>()
+                  val out = ArrayList<ZipEntryInfo>()
+                  for (e in all) {
+                      val name = e.name
+                      val slash = name.indexOf('/')
+                      if (slash < 0) out.add(e)
+                      else {
+                          val dir = name.substring(0, slash + 1)
+                          if (seenDirs.add(dir)) out.add(ZipEntryInfo(dir, 0L, true))
+                      }
+                  }
+                  return out.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+              }
+              val prefixLen = currentPath.length
+              val seenDirs = HashSet<String>()
+              val out = ArrayList<ZipEntryInfo>()
+              for (e in all) {
+                  if (!e.name.startsWith(currentPath)) continue
+                  if (e.name == currentPath) continue
+                  val rel = e.name.substring(prefixLen)
+                  if (rel.isEmpty()) continue
+                  val slash = rel.indexOf('/')
+                  if (slash < 0) out.add(e)
+                  else {
+                      val dirRel = rel.substring(0, slash + 1)
+                      val full = currentPath + dirRel
+                      if (seenDirs.add(full)) out.add(ZipEntryInfo(full, 0L, true))
+                  }
+              }
+              return out.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+          }
+
+          // ============================================================
+          // 全局搜索全屏
+          // ============================================================
+          @Composable
+          fun GlobalSearchScreen(vm: FileManagerViewModel, onDismiss: () -> Unit) {
+              BackHandler { onDismiss() }
+              Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                  Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
+                      Row(modifier = Modifier.fillMaxWidth().statusBarsPadding()
+                          .height(64.dp).padding(horizontal = 4.dp),
+                          verticalAlignment = Alignment.CenterVertically) {
+                          IconButton(onClick = onDismiss) { Icon(Icons.Filled.ArrowBack, "返回") }
+                          BasicTextField(
+                              value = vm.globalSearchQuery,
+                              onValueChange = { vm.globalSearch(it) },
+                              modifier = Modifier.weight(1f),
+                              textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface,
+                                  fontSize = MaterialTheme.typography.bodyLarge.fontSize),
+                              singleLine = true,
+                              cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                              keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                              decorationBox = { inner -> Box {
+                                  if (vm.globalSearchQuery.isEmpty()) Text("搜索整个设备…",
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  inner()
+                              } }
+                          )
+                          if (vm.globalSearchQuery.isNotEmpty()) {
+                              IconButton(onClick = { vm.globalSearch("") }) { Icon(Icons.Filled.Close, "清除") }
+                          }
+                      }
+                  }
+                  Box(Modifier.fillMaxSize()) {
+                      when {
+                          vm.globalSearchQuery.isBlank() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                              Text("输入关键词以搜索整个设备", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          }
+                          vm.isSearching -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                              Text("正在搜索…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          }
+                          vm.globalSearchResults.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                              Text("没有找到匹配项", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          }
+                          else -> Column {
+                              Text("找到 " + vm.globalSearchResults.size + " 项",
+                                  style = MaterialTheme.typography.labelMedium,
+                                  color = MaterialTheme.colorScheme.primary,
+                                  modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                              FileList(items = vm.globalSearchResults, starredPaths = vm.starredPaths,
+                                  onOpen = { it2 ->
+                                      if (it2.isDirectory) { vm.navigateTo(it2.file); onDismiss() }
+                                      else { vm.recordRecent(it2); openFileWithSystem(vm.getApplication(), it2) }
+                                  },
+                                  onMenu = { it2 -> vm.recordRecent(it2) }, grid = false)
+                          }
                       }
                   }
               }
           }
+
+          // ============================================================
+          // 不支持格式
+          // ============================================================
+          @Composable
+          fun UnsupportedScreen(item: FileItem, onDismiss: () -> Unit) {
+              val context = LocalContext.current
+              BackHandler { onDismiss() }
+              Column(modifier = Modifier.fillMaxSize().padding(32.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.Center) {
+                  Icon(ICON_MAP[item.kind] ?: Icons.Filled.InsertDriveFile, null,
+                      modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
+                  Spacer(Modifier.height(24.dp))
+                  Text(item.name, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                  Spacer(Modifier.height(8.dp))
+                  Text(item.subtitle, style = MaterialTheme.typography.bodyMedium,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Spacer(Modifier.height(32.dp))
+                  Surface(onClick = { openFileWithSystem(context, item); onDismiss() },
+                      shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.primary) {
+                      Text("用其他应用打开", color = MaterialTheme.colorScheme.onPrimary,
+                          style = MaterialTheme.typography.labelLarge,
+                          modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp))
+                  }
+                  Spacer(Modifier.height(16.dp))
+                  Surface(onClick = onDismiss, shape = RoundedCornerShape(24.dp),
+                      color = MaterialTheme.colorScheme.surfaceVariant) {
+                      Text("返回", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                          style = MaterialTheme.typography.labelLarge,
+                          modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp))
+                  }
+              }
+          }
+
+          data class ZipEntryInfo(val name: String, val size: Long, val isDirectory: Boolean)
 
           private fun fmtTime(ms: Int): String {
               if (ms <= 0) return "0:00"
@@ -1433,207 +2633,9 @@ jobs:
               return m.toString() + ":" + (if (sec < 10) "0" else "") + sec
           }
 
-          sealed interface PreviewState {
-              data object Loading : PreviewState
-              data class TextContent(val content: String) : PreviewState
-              data class ImageContent(val bitmap: Bitmap) : PreviewState
-              data class Archive(val entries: List<ZipEntryInfo>) : PreviewState
-              data class Video(val path: String) : PreviewState
-              data class Audio(val path: String) : PreviewState
-              data class Unsupported(val reason: String) : PreviewState
-          }
-
-          data class ZipEntryInfo(val name: String, val size: Long, val isDirectory: Boolean)
-
-          @OptIn(ExperimentalMaterial3Api::class)
-          @Composable
-          fun PreviewSheet(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> Unit) {
-              val context = LocalContext.current
-              val clipboard = LocalClipboardManager.current
-              val scope = rememberCoroutineScope()
-              var state by remember(item.path) { mutableStateOf<PreviewState>(PreviewState.Loading) }
-              var editing by remember(item.path) { mutableStateOf(false) }
-              var editedText by remember(item.path) { mutableStateOf("") }
-
-              LaunchedEffect(item.path) {
-                  val s = withContext(Dispatchers.IO) {
-                      try {
-                          when (item.kind) {
-                              FileKind.CODE -> {
-                                  if (item.size > 5_000_000L) PreviewState.TextContent("文件过大（" + humanSize(item.size) + "），不支持内联预览")
-                                  else PreviewState.TextContent(item.file.readText())
-                              }
-                              FileKind.IMAGE -> {
-                                  val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                  BitmapFactory.decodeFile(item.path, opts)
-                                  var sample = 1
-                                  while (opts.outWidth / sample > 2048 || opts.outHeight / sample > 2048) sample *= 2
-                                  val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
-                                  val bmp = BitmapFactory.decodeFile(item.path, decodeOpts)
-                                  if (bmp != null) PreviewState.ImageContent(bmp) else PreviewState.Unsupported("无法解码图片")
-                              }
-                              FileKind.VIDEO -> PreviewState.Video(item.path)
-                              FileKind.AUDIO -> PreviewState.Audio(item.path)
-                              FileKind.ARCHIVE -> {
-                                  if (item.extension != "zip") PreviewState.Unsupported("暂不支持 ." + item.extension + " 内预览")
-                                  else {
-                                      try {
-                                          val list = ArrayList<ZipEntryInfo>(64)
-                                          ZipFile(item.file).use { zip ->
-                                              val entries = zip.entries()
-                                              while (entries.hasMoreElements() && list.size < 1000) {
-                                                  val e = entries.nextElement()
-                                                  list.add(ZipEntryInfo(e.name, e.size, e.isDirectory))
-                                              }
-                                          }
-                                          PreviewState.Archive(list)
-                                      } catch (e2: Exception) { PreviewState.Unsupported("无法读取压缩包") }
-                                  }
-                              }
-                              else -> PreviewState.Unsupported("该格式暂不支持内置预览")
-                          }
-                      } catch (e: Exception) { PreviewState.Unsupported("读取失败：" + (e.message ?: "未知错误")) }
-                  }
-                  state = s
-                  if (s is PreviewState.TextContent) editedText = s.content
-              }
-
-              val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-              ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
-                  containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-                  Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-                      Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
-                          verticalAlignment = Alignment.CenterVertically) {
-                          Column(Modifier.weight(1f)) {
-                              Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                              Spacer(Modifier.height(2.dp))
-                              Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                          }
-                          when (val s = state) {
-                              is PreviewState.TextContent -> {
-                                  IconButton(onClick = { clipboard.setText(AnnotatedString(s.content)) }) {
-                                      Icon(Icons.Filled.ContentCopy, "复制全部")
-                                  }
-                                  IconButton(onClick = { editing = !editing }) {
-                                      Icon(Icons.Filled.Edit, if (editing) "退出编辑" else "编辑")
-                                  }
-                                  if (editing) {
-                                      IconButton(onClick = {
-                                          scope.launch {
-                                              val ok = vm.saveTextFile(item, editedText)
-                                              if (ok) { vm.showSnack("已保存"); editing = false }
-                                              else vm.showSnack("保存失败")
-                                          }
-                                      }) { Icon(Icons.Filled.Save, "保存") }
-                                  }
-                              }
-                              is PreviewState.Archive -> {
-                                  IconButton(onClick = {
-                                      scope.launch {
-                                          val target = item.file.parentFile ?: return@launch
-                                          val count = withContext(Dispatchers.IO) { vm.extractZipTo(item.file, target) }
-                                          vm.showSnack("已解压 " + count + " 个文件到 " + target.name)
-                                          vm.pullToRefresh()
-                                      }
-                                  }) { Icon(Icons.Filled.Save, "解压到当前目录") }
-                              }
-                              else -> {}
-                          }
-                      }
-                      Spacer(Modifier.height(8.dp))
-                      when (val s = state) {
-                          PreviewState.Loading -> Box(Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
-                              Text("加载中...", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                          }
-                          is PreviewState.TextContent -> {
-                              if (editing) {
-                                  OutlinedTextField(value = editedText, onValueChange = { editedText = it },
-                                      modifier = Modifier.fillMaxWidth().height(520.dp).padding(horizontal = 24.dp),
-                                      textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
-                                      singleLine = false)
-                              } else {
-                                  SelectionContainer {
-                                      Column(Modifier.fillMaxWidth().height(520.dp).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
-                                          Text(s.content, fontFamily = FontFamily.Monospace, fontSize = 13.sp,
-                                              lineHeight = 20.sp, color = MaterialTheme.colorScheme.onSurface)
-                                      }
-                                  }
-                              }
-                          }
-                          is PreviewState.ImageContent -> Box(Modifier.fillMaxWidth().height(520.dp), contentAlignment = Alignment.Center) {
-                              Image(bitmap = s.bitmap.asImageBitmap(), contentDescription = item.name,
-                                  modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                          }
-                          is PreviewState.Video -> key(s.path) { VideoPlayerView(s.path) }
-                          is PreviewState.Audio -> key(s.path) { AudioPlayerView(s.path) }
-                          is PreviewState.Archive -> {
-                              LazyColumn(Modifier.fillMaxWidth().height(520.dp)) {
-                                  item {
-                                      Text("共 " + s.entries.size + " 个条目（点击打开）",
-                                          style = MaterialTheme.typography.labelMedium,
-                                          color = MaterialTheme.colorScheme.primary,
-                                          modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
-                                  }
-                                  items(count = s.entries.size, key = { idx -> idx }) { idx ->
-                                      val e = s.entries[idx]
-                                      Row(Modifier.fillMaxWidth().clickable(enabled = !e.isDirectory) {
-                                          scope.launch {
-                                              val cacheDir = File(context.cacheDir, "zip_extract")
-                                              val outFile = withContext(Dispatchers.IO) {
-                                                  vm.extractZipEntry(item.file, e.name, cacheDir)
-                                              }
-                                              if (outFile == null) {
-                                                  Toast.makeText(context, "无法解压此条目", Toast.LENGTH_SHORT).show()
-                                                  return@launch
-                                              }
-                                              val ext = outFile.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-                                              val type = mimeOf(ext)
-                                              try {
-                                                  val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", outFile)
-                                                  val intent = Intent(Intent.ACTION_VIEW).apply {
-                                                      setDataAndType(uri, type)
-                                                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                  }
-                                                  context.startActivity(intent)
-                                              } catch (e3: Exception) {
-                                                  Toast.makeText(context, "无法打开：" + (e3.message ?: ""), Toast.LENGTH_SHORT).show()
-                                              }
-                                          }
-                                      }.padding(horizontal = 24.dp, vertical = 8.dp),
-                                          verticalAlignment = Alignment.CenterVertically) {
-                                          Icon(if (e.isDirectory) Icons.Filled.Folder else Icons.Filled.InsertDriveFile, null,
-                                              modifier = Modifier.size(20.dp),
-                                              tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                          Spacer(Modifier.width(12.dp))
-                                          Column(Modifier.weight(1f)) {
-                                              Text(e.name, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                                                  maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                                  color = MaterialTheme.colorScheme.onSurface)
-                                              if (!e.isDirectory) Text(humanSize(e.size),
-                                                  fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                          is PreviewState.Unsupported -> {
-                              Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                                  Text(s.reason, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                  Spacer(Modifier.height(16.dp))
-                                  Surface(onClick = { openFileWithSystem(context, item); onDismiss() },
-                                      shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.primary) {
-                                      Text("用其他应用打开", color = MaterialTheme.colorScheme.onPrimary,
-                                          style = MaterialTheme.typography.labelLarge,
-                                          modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp))
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
+          // ============================================================
+          // 主界面
+          // ============================================================
           private val navItems = listOf(
               NavEntry(Icons.Filled.Folder, "文件"),
               NavEntry(Icons.Filled.Schedule, "最近"),
@@ -1706,10 +2708,7 @@ jobs:
               val onOpenItem: (FileItem) -> Unit = { item ->
                   when {
                       item.isDirectory -> vm.open(item)
-                      item.kind == FileKind.APK -> {
-                          openFileWithSystem(ctx, item)
-                          vm.recordRecent(item)
-                      }
+                      item.kind == FileKind.APK -> { openFileWithSystem(ctx, item); vm.recordRecent(item) }
                       else -> previewItem = item
                   }
               }
@@ -1724,32 +2723,48 @@ jobs:
                                   verticalAlignment = Alignment.CenterVertically) {
                                   when (vm.currentTab) {
                                       Tab.FILES -> {
-                                          if (vm.searchMode) {
-                                              IconButton(onClick = { vm.exitSearch() }) { Icon(Icons.Filled.ArrowBack, "返回") }
-                                              BasicTextField(value = vm.searchQuery, onValueChange = { vm.doSearch(it) },
-                                                  modifier = Modifier.weight(1f),
-                                                  textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface,
-                                                      fontSize = MaterialTheme.typography.bodyLarge.fontSize),
-                                                  singleLine = true, cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                                  keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                                  decorationBox = { inner -> Box {
-                                                      if (vm.searchQuery.isEmpty()) Text("搜索当前目录...",
-                                                          color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                      inner()
-                                                  } })
-                                              IconButton(onClick = { vm.exitSearch() }) { Icon(Icons.Filled.Close, "关闭") }
-                                          } else {
-                                              val canUp = vm.currentDir.parentFile != null
-                                              IconButton(onClick = { vm.goUp() }, enabled = canUp) {
-                                                  Icon(Icons.Filled.ArrowBack, "返回",
-                                                      tint = if (canUp) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                                          if (vm.currentCategory != CategoryKind.ALL) {
+                                              IconButton(onClick = { vm.selectCategory(CategoryKind.ALL) }) {
+                                                  Icon(Icons.Filled.ArrowBack, "返回")
                                               }
-                                              Text(vm.currentDir.name.ifEmpty { "存储" }, style = MaterialTheme.typography.titleLarge,
-                                                  fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                              Text(vm.currentCategory.label, style = MaterialTheme.typography.titleLarge,
+                                                  fontWeight = FontWeight.Medium,
                                                   modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
-                                              IconButton(onClick = { vm.searchMode = true }) { Icon(Icons.Filled.Search, "搜索") }
-                                              IconButton(onClick = { vm.updateGrid(!vm.gridMode) }) {
-                                                  Icon(if (vm.gridMode) Icons.Filled.ViewList else Icons.Filled.GridView, "切换视图")
+                                              if (vm.isScanning) Text("扫描中…", style = MaterialTheme.typography.labelSmall,
+                                                  color = MaterialTheme.colorScheme.primary)
+                                              IconButton(onClick = { vm.scanCategory(vm.currentCategory) }, enabled = !vm.isScanning) {
+                                                  Icon(Icons.Filled.Schedule, "重新扫描")
+                                              }
+                                          } else {
+                                              if (vm.searchMode) {
+                                                  IconButton(onClick = { vm.exitSearch() }) { Icon(Icons.Filled.ArrowBack, "返回") }
+                                                  BasicTextField(value = vm.searchQuery, onValueChange = { vm.doSearch(it) },
+                                                      modifier = Modifier.weight(1f),
+                                                      textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface,
+                                                          fontSize = MaterialTheme.typography.bodyLarge.fontSize),
+                                                      singleLine = true, cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                                      keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                                      decorationBox = { inner -> Box {
+                                                          if (vm.searchQuery.isEmpty()) Text("搜索当前目录...",
+                                                              color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                          inner()
+                                                      } })
+                                                  IconButton(onClick = { vm.exitSearch() }) { Icon(Icons.Filled.Close, "关闭") }
+                                              } else {
+                                                  val canUp = vm.currentDir.parentFile != null
+                                                  IconButton(onClick = { vm.goUp() }, enabled = canUp) {
+                                                      Icon(Icons.Filled.ArrowBack, "返回",
+                                                          tint = if (canUp) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                                                  }
+                                                  Text(vm.currentDir.name.ifEmpty { "存储" }, style = MaterialTheme.typography.titleLarge,
+                                                      fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                      modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
+                                                  IconButton(onClick = { vm.globalSearchMode = true }) {
+                                                      Icon(Icons.Filled.Search, "全局搜索")
+                                                  }
+                                                  IconButton(onClick = { vm.updateGrid(!vm.gridMode) }) {
+                                                      Icon(if (vm.gridMode) Icons.Filled.ViewList else Icons.Filled.GridView, "切换视图")
+                                                  }
                                               }
                                           }
                                       }
@@ -1759,7 +2774,7 @@ jobs:
                                           modifier = Modifier.weight(1f).padding(horizontal = 16.dp))
                                   }
                               }
-                              if (vm.currentTab == Tab.FILES && !vm.searchMode) {
+                              if (vm.currentTab == Tab.FILES && vm.currentCategory == CategoryKind.ALL && !vm.searchMode) {
                                   val crumbs = remember(vm.currentDir.path) { vm.breadcrumbs() }
                                   Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
                                       .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -1776,12 +2791,13 @@ jobs:
                                               tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
                                       }
                                   }
+                                  CategoryBar(vm.currentCategory, vm::selectCategory)
                               }
                           }
                       }
                   },
                   floatingActionButton = {
-                      if (vm.currentTab != Tab.SETTINGS) {
+                      if (vm.currentTab != Tab.SETTINGS && vm.currentCategory == CategoryKind.ALL) {
                           FloatingActionButton(onClick = { sheet = UiSheet.NewMenu },
                               modifier = Modifier.padding(bottom = 96.dp, end = 8.dp),
                               containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -1793,7 +2809,22 @@ jobs:
                   }
               ) { inner ->
                   Box(Modifier.fillMaxSize().padding(inner)) {
-                      if (vm.currentTab != Tab.SETTINGS) {
+                      if (vm.currentTab == Tab.SETTINGS) SettingsScreen(vm)
+                      else if (vm.currentTab == Tab.FILES && vm.currentCategory != CategoryKind.ALL) {
+                          if (vm.isScanning && vm.categoryItems.isEmpty()) {
+                              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                  Text("正在扫描整个设备…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                              }
+                          } else if (vm.categoryItems.isEmpty()) {
+                              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                  Text("未找到" + vm.currentCategory.label + "类文件",
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant)
+                              }
+                          } else {
+                              FileList(vm.categoryItems, vm.starredPaths, onOpen = onOpenItem,
+                                  onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
+                          }
+                      } else {
                           PullToRefreshBox(isRefreshing = vm.isRefreshing, onRefresh = { vm.pullToRefresh() },
                               modifier = Modifier.fillMaxSize()) {
                               when (vm.currentTab) {
@@ -1801,35 +2832,33 @@ jobs:
                                       if (vm.items.isEmpty()) {
                                           EmptyStateList(if (vm.searchQuery.isNotBlank()) "没有匹配项" else "这个文件夹是空的",
                                               if (vm.searchQuery.isNotBlank()) "试试其他关键词" else "下拉刷新，或点击右下角 + 新建")
-                                      } else FileList(vm.items, vm.starredPaths,
-                                          onOpen = onOpenItem,
+                                      } else FileList(vm.items, vm.starredPaths, onOpen = onOpenItem,
                                           onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
                                   }
                                   Tab.RECENT -> {
                                       if (vm.recentItems.isEmpty()) EmptyStateList("暂无最近文件", "打开过的文件会出现在这里")
-                                      else FileList(vm.recentItems, vm.starredPaths,
-                                          onOpen = onOpenItem,
+                                      else FileList(vm.recentItems, vm.starredPaths, onOpen = onOpenItem,
                                           onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
                                   }
                                   Tab.STARRED -> {
                                       if (vm.starredItems.isEmpty()) EmptyStateList("暂无收藏", "在菜单中点击收藏即可加入")
-                                      else FileList(vm.starredItems, vm.starredPaths,
-                                          onOpen = onOpenItem,
+                                      else FileList(vm.starredItems, vm.starredPaths, onOpen = onOpenItem,
                                           onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode)
                                   }
                                   Tab.SETTINGS -> {}
                               }
                           }
-                      } else SettingsScreen(vm)
-
+                      }
                       FloatingNavBar(items = navItems, selectedIndex = vm.currentTab.ordinal,
                           onSelect = { vm.currentTab = Tab.values()[it] },
                           modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
                   }
               }
 
+              if (vm.globalSearchMode) GlobalSearchScreen(vm = vm, onDismiss = { vm.exitGlobalSearch() })
+
               val p = previewItem
-              if (p != null) PreviewSheet(item = p, vm = vm, onDismiss = { vm.recordRecent(p); previewItem = null })
+              if (p != null) FullScreenPreview(item = p, vm = vm, onDismiss = { vm.recordRecent(p); previewItem = null })
 
               when (val s = sheet) {
                   is UiSheet.ItemMenu -> {
@@ -1846,7 +2875,7 @@ jobs:
                                   item.kind == FileKind.EXECUTABLE -> "运行"
                                   item.kind == FileKind.VIDEO -> "播放"
                                   item.kind == FileKind.AUDIO -> "播放"
-                                  else -> "预览"
+                                  else -> "打开"
                               }) {
                               when {
                                   item.isDirectory -> vm.open(item)
@@ -1898,12 +2927,15 @@ jobs:
               LazyColumn(Modifier.fillMaxSize()) {
                   item {
                       Column(Modifier.fillParentMaxSize().padding(bottom = 120.dp),
-                          horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                          Icon(Icons.Filled.Folder, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.outlineVariant)
+                          horizontalAlignment = Alignment.CenterHorizontally,
+                          verticalArrangement = Arrangement.Center) {
+                          Icon(Icons.Filled.Folder, null, modifier = Modifier.size(64.dp),
+                              tint = MaterialTheme.colorScheme.outlineVariant)
                           Spacer(Modifier.height(16.dp))
                           Text(title, style = MaterialTheme.typography.titleMedium)
                           Spacer(Modifier.height(4.dp))
-                          Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          Text(subtitle, style = MaterialTheme.typography.bodyMedium,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant)
                       }
                   }
               }
@@ -1912,25 +2944,80 @@ jobs:
           @Composable
           fun SettingsScreen(vm: FileManagerViewModel) {
               val ctx = LocalContext.current
-              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 120.dp)) {
+              val activity = ctx as? Activity
+              val refreshRates = remember { activity?.let { supportedRefreshRates(it) } ?: listOf(60f) }
+
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                  .padding(horizontal = 16.dp).padding(bottom = 120.dp)) {
+
                   Spacer(Modifier.height(8.dp))
-                  Text("显示", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
-                      fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 8.dp))
-                  Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                      Column(Modifier.weight(1f)) {
-                          Text("高刷新率（120Hz）", style = MaterialTheme.typography.bodyLarge)
-                          Text("请求屏幕的最高刷新率模式", style = MaterialTheme.typography.labelMedium,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Text("外观", style = MaterialTheme.typography.labelMedium,
+                      color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
+                      modifier = Modifier.padding(vertical = 8.dp))
+
+                  Text("界面风格", style = MaterialTheme.typography.bodyLarge)
+                  Spacer(Modifier.height(8.dp))
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      listOf(UiStyle.MATERIAL_YOU to "Material You",
+                          UiStyle.MI_MINIX to "小米 Minix").forEach { pair ->
+                          val (style, label) = pair
+                          val selected = vm.uiStyle == style
+                          Surface(
+                              onClick = { vm.updateUiStyle(style) },
+                              shape = RoundedCornerShape(20.dp),
+                              color = if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.surface,
+                              border = BorderStroke(1.dp,
+                                  if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.outline)
+                          ) {
+                              Text(label, style = MaterialTheme.typography.labelMedium,
+                                  color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+                                      else MaterialTheme.colorScheme.onSurface,
+                                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                          }
                       }
-                      Switch(checked = vm.highRefresh, onCheckedChange = {
-                          vm.updateHighRefresh(it)
-                          (ctx as? Activity)?.let { a -> applyHighRefreshRate(a, it) }
-                      })
                   }
-                  Spacer(Modifier.height(12.dp))
-                  Text("浏览", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
-                      fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 8.dp))
-                  Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                  Spacer(Modifier.height(4.dp))
+                  Text("两种风格都使用 Android 12+ 系统动态取色（随壁纸变化）",
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                  Spacer(Modifier.height(20.dp))
+                  Text("屏幕刷新率", style = MaterialTheme.typography.bodyLarge)
+                  Text("从系统支持的刷新率中选择", style = MaterialTheme.typography.labelMedium,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  Spacer(Modifier.height(8.dp))
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      refreshRates.forEach { hz ->
+                          val label = hz.toInt().toString() + "Hz"
+                          val selected = kotlin.math.abs(vm.preferredHz - hz) < 1f
+                          Surface(
+                              onClick = {
+                                  vm.updatePreferredHz(hz)
+                                  activity?.let { a -> applyRefreshRate(a, hz) }
+                              },
+                              shape = RoundedCornerShape(20.dp),
+                              color = if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.surface,
+                              border = BorderStroke(1.dp,
+                                  if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.outline)
+                          ) {
+                              Text(label, style = MaterialTheme.typography.labelMedium,
+                                  color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+                                      else MaterialTheme.colorScheme.onSurface,
+                                  modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                          }
+                      }
+                  }
+
+                  Spacer(Modifier.height(20.dp))
+                  Text("浏览", style = MaterialTheme.typography.labelMedium,
+                      color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
+                      modifier = Modifier.padding(vertical = 8.dp))
+                  Row(Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                      verticalAlignment = Alignment.CenterVertically) {
                       Column(Modifier.weight(1f)) {
                           Text("显示隐藏文件", style = MaterialTheme.typography.bodyLarge)
                           Text("以 . 开头的文件与文件夹", style = MaterialTheme.typography.labelMedium,
@@ -1943,13 +3030,16 @@ jobs:
                   Spacer(Modifier.height(8.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       listOf("列表" to false, "网格" to true).forEach { pair ->
-                          val label = pair.first; val v = pair.second
+                          val (label, v) = pair
                           Surface(onClick = { vm.updateGrid(v) }, shape = RoundedCornerShape(20.dp),
-                              color = if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
-                              border = androidx.compose.foundation.BorderStroke(1.dp,
-                                  if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.outline)) {
+                              color = if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.surface,
+                              border = BorderStroke(1.dp,
+                                  if (vm.gridMode == v) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.outline)) {
                               Text(label, style = MaterialTheme.typography.labelMedium,
-                                  color = if (vm.gridMode == v) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                                  color = if (vm.gridMode == v) MaterialTheme.colorScheme.onSecondaryContainer
+                                      else MaterialTheme.colorScheme.onSurface,
                                   modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                           }
                       }
@@ -1959,21 +3049,36 @@ jobs:
                   Spacer(Modifier.height(8.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       listOf("名称" to SortKey.NAME, "大小" to SortKey.SIZE, "时间" to SortKey.MTIME).forEach { pair ->
-                          val label = pair.first; val v = pair.second
+                          val (label, v) = pair
                           Surface(onClick = { vm.updateSort(v) }, shape = RoundedCornerShape(20.dp),
-                              color = if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
-                              border = androidx.compose.foundation.BorderStroke(1.dp,
-                                  if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.outline)) {
+                              color = if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.surface,
+                              border = BorderStroke(1.dp,
+                                  if (vm.sortKey == v) MaterialTheme.colorScheme.secondaryContainer
+                                  else MaterialTheme.colorScheme.outline)) {
                               Text(label, style = MaterialTheme.typography.labelMedium,
-                                  color = if (vm.sortKey == v) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                                  color = if (vm.sortKey == v) MaterialTheme.colorScheme.onSecondaryContainer
+                                      else MaterialTheme.colorScheme.onSurface,
                                   modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                           }
                       }
                   }
-                  Spacer(Modifier.height(32.dp))
-                  Text("Files - MD3 v2.8 - 生命周期暂停 + 最佳实践修复",
-                      style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                      modifier = Modifier.fillMaxWidth())
+
+                  Spacer(Modifier.height(24.dp))
+                  Text("关于", style = MaterialTheme.typography.labelMedium,
+                      color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
+                      modifier = Modifier.padding(vertical = 8.dp))
+                  Surface(color = MaterialTheme.colorScheme.surfaceContainerLow,
+                      shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                      Column(Modifier.padding(16.dp)) {
+                          Text("Files · MD3  v3.3", style = MaterialTheme.typography.bodyMedium,
+                              fontWeight = FontWeight.Medium)
+                          Spacer(Modifier.height(4.dp))
+                          Text("Minix 动态取色 · Zip 完整编辑 · 全屏播放器",
+                              style = MaterialTheme.typography.labelSmall,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                  }
               }
           }
 
@@ -1982,9 +3087,22 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   enableEdgeToEdge()
-                  val enabled = prefs.getBoolean("highRefresh", true)
-                  window.decorView.post { applyHighRefreshRate(this, enabled) }
-                  setContent { MD3Theme { FileManagerScreen() } }
+                  val savedHz = prefs.getFloat("preferredHz", 0f)
+                  window.decorView.post {
+                      if (savedHz > 0f) applyRefreshRate(this, savedHz)
+                  }
+                  val savedStyle = runCatching {
+                      UiStyle.valueOf(prefs.getString("uiStyle", "MATERIAL_YOU") ?: "MATERIAL_YOU")
+                  }.getOrDefault(UiStyle.MATERIAL_YOU)
+                  setContent {
+                      MD3Theme(savedStyle) {
+                          val vm: FileManagerViewModel = viewModel()
+                          // 让 UI 响应风格切换
+                          MD3Theme(vm.uiStyle) {
+                              FileManagerScreen(vm)
+                          }
+                      }
+                  }
               }
           }
           KOTLIN_EOF
