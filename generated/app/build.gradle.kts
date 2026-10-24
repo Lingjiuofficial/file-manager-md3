@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = System.getenv("FM_VERSION_CODE")?.toIntOrNull() ?: 20
-        versionName = "5.6"
+        versionName = "5.8"
     }
 
     buildTypes {

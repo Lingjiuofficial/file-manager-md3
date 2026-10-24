@@ -37,6 +37,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -63,7 +71,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -134,6 +144,8 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -208,6 +220,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -520,8 +533,8 @@ fun File.toItem(): FileItem {
     val ext = if (isDir || !name.contains('.')) ""
         else name.substringAfterLast('.').lowercase(Locale.ROOT)
     val k = kindOf(ext, isDir)
-    val sub = if (isDir) "文件夹 - " + formatDate(lm)
-        else kindLabel(k) + " - " + humanSize(sz) + " - " + formatDate(lm)
+    val sub = if (isDir) "文件夹 · " + formatDate(lm)
+        else humanSize(sz) + " · " + formatDate(lm)
     return FileItem(absolutePath, name, isDir, sz, lm, ext, k, sub)
 }
 
@@ -1161,8 +1174,17 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
 
     var currentDir by mutableStateOf(resolveRoot(app))
         private set
-    /** 双窗格对照目录（persist 到 prefs；null = 未设置） */
-    var dualDir by mutableStateOf(prefs.getString("dualDir", null))
+    /** 双窗格（MT 式左右并列）：第二窗格目录 + 内容；activePane 0=A 1=B */
+    var dualPane by mutableStateOf(prefs.getBoolean("dualPane", false))
+        private set
+    var activePane by mutableIntStateOf(0)
+        private set
+    var paneBDir by mutableStateOf(
+        prefs.getString("paneBDir", null)?.let { File(it) }?.takeIf { it.isDirectory && it.canRead() }
+            ?: Environment.getExternalStorageDirectory()
+    )
+        private set
+    var paneBItems by mutableStateOf<List<FileItem>>(emptyList())
         private set
     var items by mutableStateOf<List<FileItem>>(emptyList())
         private set
@@ -1213,6 +1235,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
             if (f.exists() && f.isDirectory && f.canRead()) currentDir = f
         }
         refresh(force = false); refreshRecent(); refreshStarred()
+        if (dualPane) refreshPaneB()
     }
 
     private fun resolveRoot(app: Application): File {
@@ -1371,6 +1394,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun invalidateAndRefresh() {
         dirCache.remove(currentDir.absolutePath); refresh(force = true)
+        if (dualPane) refreshPaneB()
     }
 
     fun refreshRecent() {
@@ -1402,6 +1426,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
     fun open(item: FileItem) {
         if (!item.isDirectory) return
         if (!item.file.canRead()) { showSnack("无法访问"); return }
+        if (dualPane && activePane == 1) { openInPaneB(item.file); return }
         currentDir = item.file; searchQuery = ""; searchMode = false
         prefs.edit().putString("lastDir", item.path).apply()
         refresh(force = false)
@@ -1415,20 +1440,44 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    /** 双窗格：未设置时把当前目录设为对照；已设置则与对照交换跳转（反复点 = 来回切换）。 */
-    fun swapDual() {
-        val target = dualDir
-        if (target == null) {
-            dualDir = currentDir.path
-            prefs.edit().putString("dualDir", currentDir.path).apply()
-            showSnack("已将「" + currentDir.name.ifEmpty { "存储" } + "」设为双窗格目录，再点切换")
-        } else {
-            val prev = currentDir.path
-            if (navigateTo(File(target))) {
-                dualDir = prev
-                prefs.edit().putString("dualDir", prev).apply()
-                showSnack("双窗格：已切换到「" + File(target).name.ifEmpty { "存储" } + "」")
+    /** 双窗格开关（MT 式左右并列；开启时第二窗格沿用上次目录，活动焦点回到左窗格） */
+    fun toggleDualPane() {
+        dualPane = !dualPane
+        prefs.edit().putBoolean("dualPane", dualPane).apply()
+        activePane = 0
+        if (dualPane) {
+            currentCategory = CategoryKind.ALL
+            refreshPaneB()
+        }
+    }
+
+    fun setActivePane(i: Int) { if (activePane != i) activePane = i }
+
+    fun activePaneDir(): File = if (dualPane && activePane == 1) paneBDir else currentDir
+
+    fun openInPaneB(dir: File) {
+        if (!dir.isDirectory || !dir.canRead()) { showSnack("无法访问"); return }
+        paneBDir = dir
+        prefs.edit().putString("paneBDir", dir.absolutePath).apply()
+        refreshPaneB()
+    }
+
+    fun paneBUp(): Boolean {
+        val p = paneBDir.parentFile ?: return false
+        openInPaneB(p)
+        return true
+    }
+
+    fun refreshPaneB() {
+        viewModelScope.launch {
+            val dir = paneBDir
+            val key = sortKey
+            val hidden = showHidden
+            val list = withContext(Dispatchers.IO) {
+                val raw = try { dir.listFiles()?.toList() ?: emptyList() } catch (_: Exception) { emptyList() }
+                sortList(raw.filter { hidden || !it.name.startsWith(".") }.map { it.toItem() }, key)
             }
+            if (dir == paneBDir) paneBItems = list
         }
     }
 
@@ -1440,6 +1489,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun goUp(): Boolean {
+        if (dualPane && activePane == 1) return paneBUp()
         val p = currentDir.parentFile ?: return false
         if (!p.canRead()) return false
         navigateTo(p); return true
@@ -1485,7 +1535,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
         if (name.isBlank()) return
         if (name.contains('/')) { showSnack("名称不能包含 /"); return }
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { File(currentDir, name).mkdirs() }
+            val ok = withContext(Dispatchers.IO) { File(activePaneDir(), name).mkdirs() }
             if (ok) { invalidateAndRefresh(); showSnack("已创建「" + name + "」") } else showSnack("创建失败")
         }
     }
@@ -1495,7 +1545,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
         if (name.contains('/')) { showSnack("名称不能包含 /"); return }
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) {
-                try { File(currentDir, name).createNewFile() } catch (e: Exception) { false }
+                try { File(activePaneDir(), name).createNewFile() } catch (e: Exception) { false }
             }
             if (ok) { invalidateAndRefresh(); showSnack("已创建「" + name + "」") } else showSnack("创建失败")
         }
@@ -1534,7 +1584,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
     fun copy(item: FileItem) { clipboard = ClipData(ClipMode.COPY, listOf(item.path)); showSnack("已复制") }
     fun cut(item: FileItem) { clipboard = ClipData(ClipMode.CUT, listOf(item.path)); showSnack("已剪切") }
 
-    fun pasteInto(target: File = currentDir) {
+    fun pasteInto(target: File = activePaneDir()) {
         val cb = clipboard ?: return
         val sources = cb.paths.map { File(it) }
         viewModelScope.launch {
@@ -1611,6 +1661,7 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 多选与批量操作 ----------
     private fun visibleList(): List<FileItem> = when {
+        dualPane && activePane == 1 -> paneBItems
         currentTab == Tab.RECENT -> recentItems
         currentTab == Tab.STARRED -> starredItems
         currentCategory != CategoryKind.ALL -> categoryItems
@@ -1631,6 +1682,9 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
     fun exitSelection() { selectionMode = false; selectedPaths = emptySet() }
 
     fun selectAllVisible() { selectedPaths = visibleList().map { it.path }.toSet() }
+
+    /** 当前选中项（顶部"更多"操作使用） */
+    fun selectedItems(): List<FileItem> = visibleList().filter { selectedPaths.contains(it.path) }
 
     fun invertSelection() {
         selectedPaths = visibleList().map { it.path }.toSet() - selectedPaths
@@ -1783,8 +1837,8 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
         exitSelection()
         viewModelScope.launch {
             busyLabel = "正在重命名…"
-            val done = withContext(Dispatchers.IO) {
-                var n = 0
+            val renamed = withContext(Dispatchers.IO) {
+                val done = ArrayList<Pair<String, String>>(paths.size)
                 var idx = 1
                 for (p in paths) {
                     try {
@@ -1799,17 +1853,21 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
                         idx++
                         if (newName != f.name && newName.isNotBlank()) {
                             val dest = File(f.parentFile, newName)
-                            if (!dest.exists() && f.renameTo(dest)) n++
+                            if (!dest.exists() && f.renameTo(dest)) done.add(p to dest.absolutePath)
                         }
                     } catch (_: Exception) {}
                 }
-                n
+                done
             }
             busyLabel = null
-            starredPaths = starredPaths - paths.toSet()
-            prefs.edit().putStringSet("starred", starredPaths).apply()
+            if (renamed.isNotEmpty()) {
+                // 收藏路径跟着改名走（否则批量重命名会把收藏全丢掉）
+                val moved = renamed.toMap()
+                starredPaths = starredPaths.map { moved[it] ?: it }.toSet()
+                prefs.edit().putStringSet("starred", starredPaths).apply()
+            }
             invalidateAndRefresh(); refreshStarred(); refreshRecent()
-            showSnack("已重命名 " + done + " 项")
+            showSnack("已重命名 " + renamed.size + " 项")
         }
     }
 
@@ -1912,9 +1970,10 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
         sortKey = k; prefs.edit().putString("sort", k.name).apply()
         dirCache.clear(); categoryScanCache.clear()
         refresh(force = true)
+        if (dualPane) refreshPaneB()
         if (currentCategory != CategoryKind.ALL) scanCategory(currentCategory)
     }
-    fun updateShowHidden(s: Boolean) { showHidden = s; prefs.edit().putBoolean("hidden", s).apply(); dirCache.clear(); refresh(force = true) }
+    fun updateShowHidden(s: Boolean) { showHidden = s; prefs.edit().putBoolean("hidden", s).apply(); dirCache.clear(); refresh(force = true); if (dualPane) refreshPaneB() }
     fun updatePreferredHz(hz: Float) { preferredHz = hz; prefs.edit().putFloat("preferredHz", hz).apply() }
     fun updateDynamicColor(b: Boolean) { dynamicColor = b; prefs.edit().putBoolean("dynamicColor", b).apply() }
 
@@ -2051,18 +2110,18 @@ fun FileIconBadge(item: FileItem, size: Int = 44) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileRow(item: FileItem, starred: Boolean, selectionMode: Boolean, selected: Boolean,
-            onClick: () -> Unit, onMenu: () -> Unit, onToggleSelect: () -> Unit) {
+            onClick: () -> Unit, onToggleSelect: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
             .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
             .combinedClickable(
                 onClick = { if (selectionMode) onToggleSelect() else onClick() },
                 onLongClick = { onToggleSelect() }
             )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        FileIconBadge(item)
+        FileIconBadge(item, 40)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2071,7 +2130,7 @@ fun FileRow(item: FileItem, starred: Boolean, selectionMode: Boolean, selected: 
                     modifier = Modifier.weight(1f, fill = false))
                 if (starred) {
                     Spacer(Modifier.width(6.dp))
-                    Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
                 }
             }
             Spacer(Modifier.height(2.dp))
@@ -2079,24 +2138,21 @@ fun FileRow(item: FileItem, starred: Boolean, selectionMode: Boolean, selected: 
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (selectionMode) {
+            Spacer(Modifier.width(8.dp))
             Icon(if (selected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked, null,
                 tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                modifier = Modifier.size(22.dp))
-        } else {
-            IconButton(onClick = onMenu) {
-                Icon(Icons.Filled.MoreVert, "更多", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+                modifier = Modifier.size(20.dp))
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FileCard(item: FileItem, selectionMode: Boolean, selected: Boolean, onMenu: () -> Unit,
+fun FileCard(item: FileItem, selectionMode: Boolean, selected: Boolean,
              onClick: () -> Unit, onToggleSelect: () -> Unit) {
     Box(
         modifier = Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(
                 if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                 else MaterialTheme.colorScheme.surfaceContainerLow)
@@ -2105,31 +2161,28 @@ fun FileCard(item: FileItem, selectionMode: Boolean, selected: Boolean, onMenu: 
                 onLongClick = { onToggleSelect() }
             )
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 14.dp),
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.fillMaxWidth()) {
-                Box(Modifier.align(Alignment.Center)) { FileIconBadge(item, 52) }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                FileIconBadge(item, 48)
                 if (selectionMode) {
                     Icon(if (selected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked, null,
                         tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 2.dp).size(20.dp))
-                } else {
-                    IconButton(onClick = onMenu, modifier = Modifier.align(Alignment.TopEnd).size(30.dp)) {
-                        Icon(Icons.Filled.MoreVert, "更多", modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                        modifier = Modifier.align(Alignment.TopEnd).size(18.dp))
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(item.name, style = MaterialTheme.typography.labelMedium, maxLines = 2,
-                overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface)
+                overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurface)
         }
     }
 }
 
 @Composable
 fun FileList(items: List<FileItem>, starredPaths: Set<String>,
-             onOpen: (FileItem) -> Unit, onMenu: (FileItem) -> Unit, grid: Boolean,
+             onOpen: (FileItem) -> Unit, grid: Boolean,
+             contentBottomPadding: Dp = 168.dp,
              onRegisterScrollTop: (() -> Unit) -> Unit = { _ -> },
              selectionMode: Boolean = false, selectedPaths: Set<String> = emptySet(),
              onToggleSelect: (FileItem) -> Unit = {}) {
@@ -2146,23 +2199,23 @@ fun FileList(items: List<FileItem>, starredPaths: Set<String>,
     Box(Modifier.fillMaxSize()) {
     if (grid) {
         LazyVerticalGrid(columns = GridCells.Adaptive(108.dp), state = gridState, modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 180.dp),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(count = items.size, key = { items[it].path }, contentType = { "card" }) { idx ->
                 val it = items[idx]
                 FileCard(it, selectionMode = selectionMode, selected = selectedPaths.contains(it.path),
-                    onMenu = { onMenu(it) }, onClick = { onOpen(it) }, onToggleSelect = { onToggleSelect(it) })
+                    onClick = { onOpen(it) }, onToggleSelect = { onToggleSelect(it) })
             }
         }
     } else {
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 180.dp)) {
+            contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 4.dp, bottom = contentBottomPadding)) {
             items(count = items.size, key = { items[it].path }, contentType = { "row" }) { idx ->
                 val it = items[idx]
                 FileRow(it, starredPaths.contains(it.path), selectionMode = selectionMode,
                     selected = selectedPaths.contains(it.path), onClick = { onOpen(it) },
-                    onMenu = { onMenu(it) }, onToggleSelect = { onToggleSelect(it) })
+                    onToggleSelect = { onToggleSelect(it) })
             }
         }
     }
@@ -2226,26 +2279,26 @@ fun CategoryBar(selected: CategoryKind, onSelect: (CategoryKind) -> Unit) {
         CategoryKind.ARCHIVE, CategoryKind.IMAGE, CategoryKind.DOCUMENT, CategoryKind.APK
     )
     LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         items(count = all.size, key = { all[it].name }) { idx ->
             val cat = all[idx]
             val sel = cat == selected
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
+                    .clip(RoundedCornerShape(14.dp))
                     .background(if (sel) MaterialTheme.colorScheme.secondaryContainer
                         else MaterialTheme.colorScheme.surface)
                     .border(1.dp,
                         if (sel) MaterialTheme.colorScheme.secondaryContainer
-                        else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp))
+                        else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
                     .clickable { onSelect(cat) }
             ) {
                 Text(cat.label, style = MaterialTheme.typography.labelMedium,
                     color = if (sel) MaterialTheme.colorScheme.onSecondaryContainer
                         else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
     }
@@ -2260,69 +2313,66 @@ fun FloatingNavBar(items: List<NavEntry>, selectedIndex: Int, onSelect: (Int) ->
     val haptics = LocalHapticFeedback.current
     val latestIndex = rememberUpdatedState(selectedIndex)
     val latestSelect = rememberUpdatedState(onSelect)
-    val containerColor = cs.surfaceContainer
-    val activeBg = cs.secondaryContainer
-    val activeFg = cs.onSecondaryContainer
-    val inactiveFg = cs.onSurfaceVariant
-    val labelActive = cs.onSurface
-    val labelInactive = cs.onSurfaceVariant
-
+    val itemWidth = 66.dp
+    // iOS 风：整块胶囊指示器用弹簧滑到选中项（只有一个 Box 位移，开销极小）
+    val indicatorX by animateDpAsState(
+        targetValue = itemWidth * selectedIndex,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 420f),
+        label = "dock"
+    )
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(28.dp),
-        color = containerColor,
-        tonalElevation = 3.dp,
-        shadowElevation = 8.dp
+        shape = RoundedCornerShape(26.dp),
+        color = cs.surfaceContainerHigh,
+        tonalElevation = 0.dp,
+        shadowElevation = 10.dp
     ) {
-        // 按住底栏左右滑动，跟着手指切换标签（带轻触感反馈）
-        val scrub = Modifier.pointerInput(items.size) {
-            awaitEachGesture {
-                val down = awaitFirstDown(requireUnconsumed = false)
-                var lastIdx = latestIndex.value
-                var dragging = false
-                while (true) {
-                    val event = awaitPointerEvent()
-                    val change = event.changes.firstOrNull { c -> c.id == down.id } ?: break
-                    if (change.changedToUpIgnoreConsumed()) break
-                    if (!dragging && kotlin.math.abs(change.position.x - down.position.x) > viewConfiguration.touchSlop) dragging = true
-                    if (dragging) {
-                        val idx = (change.position.x / size.width * items.size).toInt().coerceIn(0, items.size - 1)
-                        if (idx != lastIdx) {
-                            lastIdx = idx
-                            latestSelect.value(idx)
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        Box(Modifier.width(itemWidth * items.size + 12.dp).height(58.dp).padding(6.dp)) {
+            Box(
+                Modifier.offset(x = indicatorX)
+                    .width(itemWidth)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(cs.primaryContainer)
+            )
+            // 按住底栏左右滑动切标签（轻触感反馈）
+            val scrub = Modifier.matchParentSize().pointerInput(items.size) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var lastIdx = latestIndex.value
+                    var dragging = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { c -> c.id == down.id } ?: break
+                        if (change.changedToUpIgnoreConsumed()) break
+                        if (!dragging && kotlin.math.abs(change.position.x - down.position.x) > viewConfiguration.touchSlop) dragging = true
+                        if (dragging) {
+                            val idx = (change.position.x / size.width * items.size).toInt().coerceIn(0, items.size - 1)
+                            if (idx != lastIdx) {
+                                lastIdx = idx
+                                latestSelect.value(idx)
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            change.consume()
                         }
-                        change.consume()
                     }
                 }
             }
-        }
-        Row(scrub.then(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            items.forEachIndexed { i, it ->
-                val sel = i == selectedIndex
-                Column(
-                    modifier = Modifier.clip(RoundedCornerShape(20.dp))
-                        .clickable { onSelect(i) }
-                        .padding(horizontal = 4.dp, vertical = 4.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(if (sel) 60.dp else 44.dp)
-                            .height(30.dp)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(if (sel) activeBg else Color.Transparent),
-                        contentAlignment = Alignment.Center
+            Row(scrub) {
+                items.forEachIndexed { i, it ->
+                    val sel = i == selectedIndex
+                    Column(
+                        modifier = Modifier.weight(1f).fillMaxHeight().clickable { onSelect(i) },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
                         Icon(it.icon, it.label,
-                            tint = if (sel) activeFg else inactiveFg,
-                            modifier = Modifier.size(22.dp))
+                            tint = if (sel) cs.onPrimaryContainer else cs.onSurfaceVariant,
+                            modifier = Modifier.size(21.dp))
+                        Spacer(Modifier.height(3.dp))
+                        Text(it.label, style = MaterialTheme.typography.labelSmall,
+                            color = if (sel) cs.onPrimaryContainer else cs.onSurfaceVariant)
                     }
-                    Spacer(Modifier.height(2.dp))
-                    Text(it.label, style = MaterialTheme.typography.labelSmall,
-                        color = if (sel) labelActive else labelInactive)
                 }
             }
         }
@@ -2588,7 +2638,7 @@ fun TextEditorScreen(item: FileItem, vm: FileManagerViewModel, onDismiss: () -> 
         }, onDismiss = { showReplace = false })
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().imePadding()) {
         Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
             Row(
                 modifier = Modifier.fillMaxWidth().statusBarsPadding()
@@ -3553,7 +3603,6 @@ private fun buildZipDisplayItems(all: List<ZipEntryInfo>, currentPath: String): 
 @Composable
 fun GlobalSearchScreen(vm: FileManagerViewModel, onDismiss: () -> Unit) {
     BackHandler { onDismiss() }
-    var gsItem by remember { mutableStateOf<FileItem?>(null) }
     Column(Modifier.fillMaxSize().consumeAllPointerInput().background(MaterialTheme.colorScheme.background)) {
         Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
             Row(modifier = Modifier.fillMaxWidth().statusBarsPadding()
@@ -3601,21 +3650,12 @@ fun GlobalSearchScreen(vm: FileManagerViewModel, onDismiss: () -> Unit) {
                             if (it2.isDirectory) { vm.navigateTo(it2.file); onDismiss() }
                             else { vm.recordRecent(it2); openFileWithSystem(vm.getApplication(), it2) }
                         },
-                        onMenu = { it2 -> gsItem = it2 }, grid = false)
+                        grid = false)
                 }
             }
         }
     }
 
-    val gi = gsItem
-    if (gi != null) {
-        ActionSheet(title = gi.name, subtitle = gi.path, actions = buildList {
-            add(SheetAction(Icons.Filled.FolderOpen, "打开所在文件夹") { vm.openParentOf(gi); onDismiss() })
-            add(SheetAction(if (vm.isStarred(gi.path)) Icons.Filled.Star else Icons.Filled.StarBorder,
-                if (vm.isStarred(gi.path)) "取消收藏" else "收藏") { vm.toggleStar(gi) })
-            add(SheetAction(Icons.Filled.Share, "分享") { vm.shareItems(listOf(gi.path)) })
-        }, onDismiss = { gsItem = null })
-    }
 }
 
 // ============================================================
@@ -4411,7 +4451,6 @@ private val navItems = listOf(
 
 private sealed interface UiSheet {
     data object NewMenu : UiSheet
-    data class ItemMenu(val item: FileItem) : UiSheet
 }
 
 private sealed interface UiDialog {
@@ -4490,6 +4529,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
     var showFtp by remember { mutableStateOf(false) }
     var showRoot by remember { mutableStateOf(false) }
     var showStorage by remember { mutableStateOf(false) }
+    var showTopMenu by remember { mutableStateOf(false) }
     var hexItem by remember { mutableStateOf<FileItem?>(null) }
 
     val onOpenItem: (FileItem) -> Unit = { item ->
@@ -4505,31 +4545,37 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
         topBar = {
             Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
                 Column(Modifier.statusBarsPadding()) {
-                    Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 4.dp),
+                    Row(Modifier.fillMaxWidth().height(56.dp).padding(start = 4.dp, end = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         if (vm.selectionMode) {
                             IconButton(onClick = { vm.exitSelection() }) { Icon(Icons.Filled.Close, "退出多选") }
                             Text("已选 " + vm.selectedPaths.size + " 项", style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Medium, maxLines = 1,
-                                modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
+                                modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
                             IconButton(onClick = { vm.copySelection() }) { Icon(Icons.Filled.ContentCopy, "复制") }
                             IconButton(onClick = { vm.cutSelection() }) { Icon(Icons.Filled.ContentCut, "剪切") }
-                            IconButton(onClick = { showZipDialog = true }) { Icon(Icons.Filled.Archive, "压缩") }
                             IconButton(onClick = { showSelDelete = true }) { Icon(Icons.Filled.Delete, "删除") }
                             IconButton(onClick = { showSelMore = true }) { Icon(Icons.Filled.MoreVert, "更多") }
+                        } else if (vm.currentTab == Tab.FILES && vm.dualPane) {
+                            IconButton(onClick = { vm.toggleDualPane() }) { Icon(Icons.Filled.Close, "退出双窗格") }
+                            Text("双窗格", style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+                            IconButton(onClick = { showTopMenu = true }) { Icon(Icons.Filled.MoreVert, "更多") }
                         } else when (vm.currentTab) {
                             Tab.FILES -> {
                                 if (vm.currentCategory != CategoryKind.ALL) {
                                     IconButton(onClick = { vm.selectCategory(CategoryKind.ALL) }) {
                                         Icon(Icons.Filled.ArrowBack, "返回")
                                     }
-                                    Text(vm.currentCategory.label, style = MaterialTheme.typography.titleLarge,
+                                    Text(vm.currentCategory.label, style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Medium,
-                                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
+                                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
                                     if (vm.isScanning) Text("扫描中…", style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary)
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(end = 4.dp))
                                     IconButton(onClick = { vm.scanCategory(vm.currentCategory) }, enabled = !vm.isScanning) {
-                                        Icon(Icons.Filled.Schedule, "重新扫描")
+                                        Icon(Icons.Filled.Refresh, "重新扫描")
                                     }
                                 } else {
                                     if (vm.searchMode) {
@@ -4550,34 +4596,30 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                                         val canUp = vm.currentDir.parentFile != null
                                         IconButton(onClick = { vm.goUp() }, enabled = canUp) {
                                             Icon(Icons.Filled.ArrowBack, "返回",
-                                                tint = if (canUp) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                                                tint = if (canUp) MaterialTheme.colorScheme.onSurface
+                                                    else MaterialTheme.colorScheme.outlineVariant)
                                         }
-                                        Text(vm.currentDir.name.ifEmpty { "存储" }, style = MaterialTheme.typography.titleLarge,
+                                        Text(vm.currentDir.name.ifEmpty { "存储" }, style = MaterialTheme.typography.titleMedium,
                                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
-                                        IconButton(onClick = { vm.swapDual() }) {
-                                            Icon(Icons.Filled.SwapHoriz, "双窗格",
-                                                tint = if (vm.dualDir != null) MaterialTheme.colorScheme.primary
-                                                    else MaterialTheme.colorScheme.onSurface)
-                                        }
+                                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
                                         IconButton(onClick = { vm.globalSearchMode = true }) {
                                             Icon(Icons.Filled.Search, "全局搜索")
                                         }
-                                        IconButton(onClick = { vm.updateGrid(!vm.gridMode) }) {
-                                            Icon(if (vm.gridMode) Icons.Filled.ViewList else Icons.Filled.GridView, "切换视图")
+                                        IconButton(onClick = { showTopMenu = true }) {
+                                            Icon(Icons.Filled.MoreVert, "更多")
                                         }
                                     }
                                 }
                             }
                             else -> Text(
                                 when (vm.currentTab) { Tab.RECENT -> "最近"; Tab.STARRED -> "收藏"; else -> "设置" },
-                                style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium,
+                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
                                 modifier = Modifier.weight(1f).padding(horizontal = 16.dp))
                         }
                     }
-                    if (vm.currentTab == Tab.FILES && vm.currentCategory == CategoryKind.ALL && !vm.searchMode && !vm.selectionMode) {
+                    if (vm.currentTab == Tab.FILES && !vm.dualPane && vm.currentCategory == CategoryKind.ALL && !vm.searchMode && !vm.selectionMode) {
                         val crumbs = remember(vm.currentDir.path) { vm.breadcrumbs() }
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                                 verticalAlignment = Alignment.CenterVertically) {
@@ -4585,23 +4627,23 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                                     val last = i == crumbs.lastIndex
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(16.dp))
-                                            .background(if (last) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(if (last) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
                                             .clickable { vm.navigateTo(f) }
                                     ) {
-                                        Text(if (f.name.isEmpty()) "存储" else f.name, style = MaterialTheme.typography.labelMedium,
+                                        Text(if (f.name.isEmpty()) "存储" else f.name, style = MaterialTheme.typography.labelSmall,
                                             color = if (last) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
                                     }
                                     if (!last) Icon(Icons.Filled.ChevronRight, null,
-                                        tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
+                                        tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(14.dp))
                                 }
                             }
                             IconButton(onClick = { dialog = UiDialog.JumpTo },
-                                modifier = Modifier.size(32.dp)) {
+                                modifier = Modifier.size(28.dp)) {
                                 Icon(Icons.Filled.Edit, "跳转到路径",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(16.dp))
+                                    modifier = Modifier.size(15.dp))
                             }
                         }
                         CategoryBar(vm.currentCategory, vm::selectCategory)
@@ -4611,7 +4653,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
         },
 
     floatingActionButton = {
-        if (vm.currentTab != Tab.SETTINGS && vm.currentCategory == CategoryKind.ALL && !vm.selectionMode) {
+        if (vm.currentTab != Tab.SETTINGS && !vm.dualPane && vm.currentCategory == CategoryKind.ALL && !vm.selectionMode) {
             FloatingActionButton(onClick = { sheet = UiSheet.NewMenu },
                 modifier = Modifier.padding(bottom = 96.dp, end = 8.dp),
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -4624,6 +4666,9 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
 ) { inner ->
     Box(Modifier.fillMaxSize().padding(inner)) {
         if (vm.currentTab == Tab.SETTINGS) SettingsScreen(vm, onOpenToolbox = { showToolbox = true }, onOpenFtp = { showFtp = true }, onOpenRoot = { showRoot = true }, onOpenStorage = { showStorage = true })
+        else if (vm.currentTab == Tab.FILES && vm.dualPane) {
+            DualPaneView(vm = vm, onPreview = { previewItem = it })
+        }
         else if (vm.currentTab == Tab.FILES && vm.currentCategory != CategoryKind.ALL) {
             if (vm.isScanning && vm.categoryItems.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -4636,7 +4681,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                 }
             } else {
                 FileList(vm.categoryItems, vm.starredPaths, onOpen = onOpenItem,
-                    onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
+                    grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
             }
         } else {
             PullToRefreshBox(isRefreshing = vm.isRefreshing, onRefresh = { vm.pullToRefresh() },
@@ -4647,17 +4692,17 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                             EmptyStateList(if (vm.searchQuery.isNotBlank()) "没有匹配项" else "这个文件夹是空的",
                                 if (vm.searchQuery.isNotBlank()) "试试其他关键词" else "下拉刷新，或点击右下角 + 新建")
                         } else FileList(vm.items, vm.starredPaths, onOpen = onOpenItem,
-                            onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
+                            grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
                     }
                     Tab.RECENT -> {
                         if (vm.recentItems.isEmpty()) EmptyStateList("暂无最近文件", "打开过的文件会出现在这里")
                         else FileList(vm.recentItems, vm.starredPaths, onOpen = onOpenItem,
-                            onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
+                            grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
                     }
                     Tab.STARRED -> {
                         if (vm.starredItems.isEmpty()) EmptyStateList("暂无收藏", "在菜单中点击收藏即可加入")
                         else FileList(vm.starredItems, vm.starredPaths, onOpen = onOpenItem,
-                            onMenu = { item -> sheet = UiSheet.ItemMenu(item) }, grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
+                            grid = vm.gridMode, onRegisterScrollTop = { fn -> scrollTopAction = fn }, selectionMode = vm.selectionMode, selectedPaths = vm.selectedPaths, onToggleSelect = { vm.enterOrToggle(it) })
                     }
                     Tab.SETTINGS -> {}
                 }
@@ -4668,7 +4713,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                 if (i == vm.currentTab.ordinal) scrollTopAction?.invoke()
                 else { vm.exitSelection(); vm.currentTab = Tab.values()[i] }
             },
-            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp))
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp))
 
         val busyNow = vm.busyLabel
         if (busyNow != null) {
@@ -4688,72 +4733,62 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
     }
 }
 
-    if (vm.globalSearchMode) GlobalSearchScreen(vm = vm, onDismiss = { vm.exitGlobalSearch() })
+    AnimatedVisibility(
+        visible = vm.globalSearchMode,
+        enter = slideInHorizontally(tween(190)) { it / 4 } + fadeIn(tween(150)),
+        exit = slideOutHorizontally(tween(160)) { it / 4 } + fadeOut(tween(120))
+    ) {
+        GlobalSearchScreen(vm = vm, onDismiss = { vm.exitGlobalSearch() })
+    }
 
-    val p = previewItem
-    if (p != null) FullScreenPreview(item = p, vm = vm, onDismiss = { vm.recordRecent(p); previewItem = null })
+    var lastPreview by remember { mutableStateOf<FileItem?>(null) }
+    val shownPreview = previewItem ?: lastPreview
+    if (previewItem != null && previewItem != lastPreview) lastPreview = previewItem
+    AnimatedVisibility(
+        visible = previewItem != null,
+        enter = slideInHorizontally(tween(210)) { it / 5 } + fadeIn(tween(160)),
+        exit = slideOutHorizontally(tween(160)) { it / 5 } + fadeOut(tween(110))
+    ) {
+        val lp = shownPreview
+        if (lp != null) FullScreenPreview(item = lp, vm = vm, onDismiss = { vm.recordRecent(lp); previewItem = null })
+    }
 
-    val hx = hexItem
-    if (hx != null) {
-        Surface(Modifier.fillMaxSize().consumeAllPointerInput(), color = MaterialTheme.colorScheme.background) {
-            HexViewerScreen(hx, onDismiss = { hexItem = null })
+    var lastHex by remember { mutableStateOf<FileItem?>(null) }
+    val shownHex = hexItem ?: lastHex
+    if (hexItem != null && hexItem != lastHex) lastHex = hexItem
+    AnimatedVisibility(
+        visible = hexItem != null,
+        enter = slideInHorizontally(tween(200)) { it / 5 } + fadeIn(tween(150)),
+        exit = slideOutHorizontally(tween(150)) { it / 5 } + fadeOut(tween(110))
+    ) {
+        val lh = shownHex
+        if (lh != null) {
+            Surface(Modifier.fillMaxSize().consumeAllPointerInput(), color = MaterialTheme.colorScheme.background) {
+                HexViewerScreen(lh, onDismiss = { hexItem = null })
+            }
         }
     }
 
-    when (val s = sheet) {
-        is UiSheet.ItemMenu -> {
-            val item = s.item
-            ActionSheet(title = item.name, subtitle = item.subtitle, actions = buildList {
-                add(SheetAction(
-                    if (item.isDirectory) Icons.Filled.FolderOpen
-                    else if (item.kind == FileKind.APK) Icons.Filled.Android
-                    else if (item.kind == FileKind.EXECUTABLE) Icons.Filled.Terminal
-                    else Icons.Filled.InsertDriveFile,
-                    when {
-                        item.isDirectory -> "打开"
-                        item.kind == FileKind.EXECUTABLE -> "运行"
-                        item.kind == FileKind.VIDEO -> "播放"
-                        item.kind == FileKind.AUDIO -> "播放"
-                        else -> "打开"
-                    }) {
-                    when {
-                        item.isDirectory -> vm.open(item)
-                        item.kind == FileKind.EXECUTABLE -> { openFileWithSystem(ctx, item); vm.recordRecent(item) }
-                        else -> previewItem = item
-                    }
-                })
-                if (item.kind == FileKind.APK) {
-                    add(SheetAction(Icons.Filled.Android, "安装") { openFileWithSystem(ctx, item); vm.recordRecent(item) })
-                }
-                if (!item.isDirectory && item.kind != FileKind.APK && item.kind != FileKind.EXECUTABLE) {
-                    add(SheetAction(Icons.Filled.FolderOpen, "用其他应用打开") { openFileWithSystem(ctx, item); vm.recordRecent(item) })
-                }
-                add(SheetAction(if (vm.isStarred(item.path)) Icons.Filled.Star else Icons.Filled.StarBorder,
-                    if (vm.isStarred(item.path)) "取消收藏" else "收藏") { vm.toggleStar(item) })
-                add(SheetAction(Icons.Filled.Edit, "重命名") { dialog = UiDialog.Rename(item) })
-                add(SheetAction(Icons.Filled.ContentCopy, "复制") { vm.copy(item) })
-                add(SheetAction(Icons.Filled.ContentCut, "剪切") { vm.cut(item) })
-                if (item.isDirectory) add(SheetAction(Icons.Filled.ContentPaste, "粘贴到此处",
-                    enabled = vm.clipboard != null) { vm.pasteInto(item.file) })
-                add(SheetAction(Icons.Filled.FolderOpen, "打开所在文件夹") { vm.openParentOf(item) })
-                add(SheetAction(Icons.Filled.Info, "属性") { dialog = UiDialog.Props(item) })
-                add(SheetAction(Icons.Filled.Archive, "压缩为 ZIP") { vm.zipFiles(listOf(item.file), item.name.substringBeforeLast('.', item.name)) })
-                add(SheetAction(Icons.Filled.Share, "分享") { vm.shareItems(listOf(item.path)) })
-                if (item.isDirectory) add(SheetAction(Icons.Filled.Storage, "计算大小") { vm.computeDirSize(item) { t -> if (t != null) dialog = UiDialog.Hash(item, t) else vm.showSnack("统计失败") } })
-                else add(SheetAction(Icons.Filled.Fingerprint, "校验哈希") { vm.computeHashes(item) { t -> if (t != null) dialog = UiDialog.Hash(item, t) else vm.showSnack("计算失败") } })
-                add(SheetAction(Icons.Filled.Code, "十六进制查看") { hexItem = item })
-                if (item.extension in setOf("7z", "tar", "tgz", "gz", "rar")) add(SheetAction(Icons.Filled.FolderOpen, "解压到当前目录") { vm.extractOtherArchive(item) })
-                add(SheetAction(Icons.Filled.Delete, "删除", destructive = true) { dialog = UiDialog.Delete(item) })
-            }, onDismiss = { sheet = null })
-        }
-        UiSheet.NewMenu -> {
-            ActionSheet(title = "新建", actions = buildList {
-                add(SheetAction(Icons.Filled.CreateNewFolder, "新建文件夹") { dialog = UiDialog.NewFolder })
-                add(SheetAction(Icons.Filled.InsertDriveFile, "新建文件") { dialog = UiDialog.NewFile })
-                if (vm.clipboard != null) add(SheetAction(Icons.Filled.ContentPaste, "粘贴到此处") { vm.pasteInto() })
-            }, onDismiss = { sheet = null })
-        }
-        null -> Unit
+    if (sheet == UiSheet.NewMenu) {
+        ActionSheet(title = "新建", actions = buildList {
+            add(SheetAction(Icons.Filled.CreateNewFolder, "新建文件夹") { dialog = UiDialog.NewFolder })
+            add(SheetAction(Icons.Filled.InsertDriveFile, "新建文件") { dialog = UiDialog.NewFile })
+            if (vm.clipboard != null) add(SheetAction(Icons.Filled.ContentPaste, "粘贴到此处") { vm.pasteInto() })
+        }, onDismiss = { sheet = null })
+    }
+    if (showTopMenu) {
+        ActionSheet(title = "更多", subtitle = vm.currentDir.absolutePath, actions = buildList {
+            add(SheetAction(Icons.Filled.CreateNewFolder, "新建文件夹") { dialog = UiDialog.NewFolder })
+            add(SheetAction(Icons.Filled.InsertDriveFile, "新建文件") { dialog = UiDialog.NewFile })
+            if (vm.clipboard != null) add(SheetAction(Icons.Filled.ContentPaste, "粘贴到此处") { vm.pasteInto() })
+            add(SheetAction(if (vm.gridMode) Icons.Filled.ViewList else Icons.Filled.GridView,
+                if (vm.gridMode) "切换为列表视图" else "切换为网格视图") { vm.updateGrid(!vm.gridMode) })
+            add(SheetAction(Icons.Filled.SwapHoriz, if (vm.dualPane) "退出双窗格" else "开启双窗格") { vm.toggleDualPane() })
+            add(SheetAction(if (vm.showHidden) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                if (vm.showHidden) "隐藏隐藏文件" else "显示隐藏文件") { vm.updateShowHidden(!vm.showHidden) })
+            add(SheetAction(Icons.Filled.Refresh, "刷新") { vm.refresh(force = true); if (vm.dualPane) vm.refreshPaneB() })
+            add(SheetAction(Icons.Filled.Edit, "跳转到目录") { dialog = UiDialog.JumpTo })
+        }, onDismiss = { showTopMenu = false })
     }
 
     when (val d = dialog) {
@@ -4796,32 +4831,141 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
             onDismiss = { showBatchRename = false })
     }
     if (showSelMore) {
-        ActionSheet(title = "多选操作", subtitle = "已选 " + vm.selectedPaths.size + " 项", actions = buildList {
-            add(SheetAction(Icons.Filled.SelectAll, "全选") { vm.selectAllVisible() })
-            add(SheetAction(Icons.Filled.SwapHoriz, "反选") { vm.invertSelection() })
-            add(SheetAction(Icons.Filled.Edit, "批量重命名") { showBatchRename = true })
+        val sel = vm.selectedItems()
+        val single = sel.singleOrNull()
+        ActionSheet(title = if (single != null) single.name else "批量操作",
+            subtitle = "已选 " + vm.selectedPaths.size + " 项", actions = buildList {
+            if (single != null) {
+                val it0 = single
+                add(SheetAction(if (it0.isDirectory) Icons.Filled.FolderOpen else Icons.Filled.Description, "打开") {
+                    vm.exitSelection()
+                    if (it0.isDirectory) vm.open(it0) else previewItem = it0
+                })
+                if (!it0.isDirectory) add(SheetAction(Icons.Filled.FolderOpen, "用其他应用打开") {
+                    openFileWithSystem(ctx, it0); vm.recordRecent(it0)
+                })
+                add(SheetAction(if (vm.isStarred(it0.path)) Icons.Filled.Star else Icons.Filled.StarBorder,
+                    if (vm.isStarred(it0.path)) "取消收藏" else "收藏") { vm.toggleStar(it0) })
+                add(SheetAction(Icons.Filled.Edit, "重命名") { dialog = UiDialog.Rename(it0) })
+                add(SheetAction(Icons.Filled.Info, "属性") { dialog = UiDialog.Props(it0) })
+                if (it0.isDirectory) add(SheetAction(Icons.Filled.Storage, "计算大小") {
+                    vm.computeDirSize(it0) { t -> if (t != null) dialog = UiDialog.Hash(it0, t) else vm.showSnack("统计失败") }
+                }) else add(SheetAction(Icons.Filled.Fingerprint, "校验哈希") {
+                    vm.computeHashes(it0) { t -> if (t != null) dialog = UiDialog.Hash(it0, t) else vm.showSnack("计算失败") }
+                })
+                if (!it0.isDirectory) add(SheetAction(Icons.Filled.Code, "十六进制查看") { hexItem = it0 })
+                if (it0.extension in setOf("7z", "tar", "tgz", "gz", "rar")) {
+                    add(SheetAction(Icons.Filled.FolderOpen, "解压到当前目录") { vm.extractOtherArchive(it0) })
+                }
+                add(SheetAction(Icons.Filled.Delete, "删除", destructive = true) { dialog = UiDialog.Delete(it0) })
+            } else {
+                add(SheetAction(Icons.Filled.SelectAll, "全选") { vm.selectAllVisible() })
+                add(SheetAction(Icons.Filled.SwapHoriz, "反选") { vm.invertSelection() })
+                add(SheetAction(Icons.Filled.Edit, "批量重命名") { showBatchRename = true })
+            }
+            add(SheetAction(Icons.Filled.Archive, "压缩为 ZIP") { showZipDialog = true })
             add(SheetAction(Icons.Filled.Share, "分享") { vm.shareSelection() })
         }, onDismiss = { showSelMore = false })
     }
-    if (showToolbox) {
+    AnimatedVisibility(
+        visible = showToolbox,
+        enter = slideInHorizontally(tween(190)) { it / 6 } + fadeIn(tween(150)),
+        exit = slideOutHorizontally(tween(150)) { it / 6 } + fadeOut(tween(110))
+    ) {
         Surface(Modifier.fillMaxSize().consumeAllPointerInput(), color = MaterialTheme.colorScheme.background) {
             ToolboxScreen(onDismiss = { showToolbox = false })
         }
     }
-    if (showFtp) {
+    AnimatedVisibility(
+        visible = showFtp,
+        enter = slideInHorizontally(tween(190)) { it / 6 } + fadeIn(tween(150)),
+        exit = slideOutHorizontally(tween(150)) { it / 6 } + fadeOut(tween(110))
+    ) {
         Surface(Modifier.fillMaxSize().consumeAllPointerInput(), color = MaterialTheme.colorScheme.background) {
             FtpScreen(vm = vm, onDismiss = { showFtp = false })
         }
     }
-    if (showRoot) {
+    AnimatedVisibility(
+        visible = showRoot,
+        enter = slideInHorizontally(tween(190)) { it / 6 } + fadeIn(tween(150)),
+        exit = slideOutHorizontally(tween(150)) { it / 6 } + fadeOut(tween(110))
+    ) {
         Surface(Modifier.fillMaxSize().consumeAllPointerInput(), color = MaterialTheme.colorScheme.background) {
             RootBrowserScreen(onDismiss = { showRoot = false })
         }
     }
-    if (showStorage) {
+    AnimatedVisibility(
+        visible = showStorage,
+        enter = slideInHorizontally(tween(190)) { it / 6 } + fadeIn(tween(150)),
+        exit = slideOutHorizontally(tween(150)) { it / 6 } + fadeOut(tween(110))
+    ) {
         Surface(Modifier.fillMaxSize().consumeAllPointerInput(), color = MaterialTheme.colorScheme.background) {
             StorageAnalysisScreen(onDismiss = { showStorage = false })
         }
+    }
+}
+
+// ============================================================
+// MT 式双窗格（左右并列，独立目录；点哪边哪边生效）
+// ============================================================
+@Composable
+fun DualPaneView(vm: FileManagerViewModel, onPreview: (FileItem) -> Unit) {
+    Row(Modifier.fillMaxSize()) {
+        DualPaneColumn(vm, 0, vm.currentDir, vm.items, vm.activePane == 0, onPreview, Modifier.weight(1f))
+        Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
+        DualPaneColumn(vm, 1, vm.paneBDir, vm.paneBItems, vm.activePane == 1, onPreview, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun DualPaneColumn(vm: FileManagerViewModel, index: Int, dir: File,
+                           items: List<FileItem>, active: Boolean,
+                           onPreview: (FileItem) -> Unit, modifier: Modifier = Modifier) {
+    val cs = MaterialTheme.colorScheme
+    Column(
+        modifier.fillMaxHeight()
+            .background(if (active) cs.primary.copy(alpha = 0.04f) else Color.Transparent)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 4.dp)
+                .clickable { vm.setActivePane(index) },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    vm.setActivePane(index)
+                    if (index == 0) {
+                        val parent = dir.parentFile
+                        if (parent != null) vm.navigateTo(parent)
+                    } else vm.paneBUp()
+                },
+                enabled = dir.parentFile != null,
+                modifier = Modifier.size(26.dp)
+            ) {
+                Icon(Icons.Filled.ArrowUpward, "上级",
+                    modifier = Modifier.size(15.dp),
+                    tint = if (active) cs.primary else cs.onSurfaceVariant)
+            }
+            Text(dir.name.ifEmpty { "存储" }, style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (active) cs.onSurface else cs.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(horizontal = 2.dp))
+        }
+        FileList(
+            items = items, starredPaths = vm.starredPaths,
+            onOpen = { item ->
+                vm.setActivePane(index)
+                if (item.isDirectory) {
+                    if (index == 0) vm.open(item) else vm.openInPaneB(item.file)
+                } else onPreview(item)
+            },
+            grid = false,
+            contentBottomPadding = 96.dp,
+            selectionMode = vm.selectionMode,
+            selectedPaths = vm.selectedPaths,
+            onToggleSelect = { vm.setActivePane(index); vm.enterOrToggle(it) }
+        )
     }
 }
 
@@ -5085,7 +5229,7 @@ fun SettingsScreen(vm: FileManagerViewModel, onOpenToolbox: () -> Unit = {}, onO
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { showAbout = true }) {
             Column(Modifier.padding(16.dp)) {
-                Text("Files · MD3  v5.6", style = MaterialTheme.typography.bodyMedium,
+                Text("Files · MD3  v5.8", style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(4.dp))
                 Text("压缩解压 · 内置查看 · FTP · 开源 (GPL-3.0)",
@@ -6255,7 +6399,7 @@ fun AboutDialog(onOpenRepo: () -> Unit, onDismiss: () -> Unit) {
         title = { Text("Files · MD3") },
         text = {
             Column {
-                Text("版本：v5.6", style = MaterialTheme.typography.bodyMedium)
+                Text("版本：v5.8", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(4.dp))
                 Text("作者：Lingjiuofficial", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(4.dp))
