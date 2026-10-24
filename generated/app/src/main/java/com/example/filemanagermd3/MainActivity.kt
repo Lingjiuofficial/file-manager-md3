@@ -1451,7 +1451,8 @@ class FileManagerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setActivePane(i: Int) { if (activePane != i) activePane = i }
+    /** 切换活动窗格（不能叫 setActivePane：会和 activePane 的 JVM setter 撞签名） */
+    fun selectPane(i: Int) { if (activePane != i) activePane = i }
 
     fun activePaneDir(): File = if (dualPane && activePane == 1) paneBDir else currentDir
 
@@ -4928,12 +4929,12 @@ private fun DualPaneColumn(vm: FileManagerViewModel, index: Int, dir: File,
     ) {
         Row(
             Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 4.dp)
-                .clickable { vm.setActivePane(index) },
+                .clickable { vm.selectPane(index) },
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
                 onClick = {
-                    vm.setActivePane(index)
+                    vm.selectPane(index)
                     if (index == 0) {
                         val parent = dir.parentFile
                         if (parent != null) vm.navigateTo(parent)
@@ -4955,7 +4956,7 @@ private fun DualPaneColumn(vm: FileManagerViewModel, index: Int, dir: File,
         FileList(
             items = items, starredPaths = vm.starredPaths,
             onOpen = { item ->
-                vm.setActivePane(index)
+                vm.selectPane(index)
                 if (item.isDirectory) {
                     if (index == 0) vm.open(item) else vm.openInPaneB(item.file)
                 } else onPreview(item)
@@ -4964,7 +4965,7 @@ private fun DualPaneColumn(vm: FileManagerViewModel, index: Int, dir: File,
             contentBottomPadding = 96.dp,
             selectionMode = vm.selectionMode,
             selectedPaths = vm.selectedPaths,
-            onToggleSelect = { vm.setActivePane(index); vm.enterOrToggle(it) }
+            onToggleSelect = { vm.selectPane(index); vm.enterOrToggle(it) }
         )
     }
 }
