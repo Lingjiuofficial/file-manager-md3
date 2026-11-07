@@ -58,14 +58,14 @@ jobs:
         if: steps.build.outcome == 'success'
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/release/app-release.apk "out/FileKeeper-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "out/FileKeeper.apk"
 
       - name: Upload artifact
         if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: FileKeeper-apk
-          path: out/*.apk
+          path: out/FileKeeper.apk
 
       - name: Publish latest release
         if: steps.build.outcome == 'success' && github.ref == 'refs/heads/main'
