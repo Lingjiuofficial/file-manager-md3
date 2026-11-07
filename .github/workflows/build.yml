@@ -28,7 +28,23 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build release APK
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+        run: |
+          set +e
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace > build.log 2>&1
+          code=$?
+          echo "EXIT=$code" >> build.log
+          exit $code
+
+      - name: Push build log on failure
+        if: failure()
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git checkout -B ci-log
+          cp build.log ci-build.log || true
+          git add ci-build.log || true
+          git commit -m "ci build log" || true
+          git push -f origin ci-log
 
       - name: Rename APK
         run: |
