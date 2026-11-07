@@ -15,50 +15,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Grant execute permission
-        run: chmod +x gradlew
-
-      - name: Build release APK
+      - name: Build
+        id: build
+        continue-on-error: true
         run: |
-          set +e
-          ./gradlew :app:assembleRelease --no-daemon --stacktrace > build.log 2>&1
-          code=$?
-          echo "EXIT=$code" >> build.log
-          exit $code
+          chmod +x gradlew
+          {
+            echo "JAVA: $(java -version 2>&1 | head -1)"
+            echo "SDK: $ANDROID_HOME"
+            ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          } > build.log 2>&1
 
-      - name: Push build log on failure
-        if: failure()
+      - name: Show log
+        if: always()
+        run: tail -100 build.log || true
+
+      - name: Push log on failure
+        if: steps.build.outcome == 'failure'
         run: |
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
+          git config user.name ci-bot
+          git config user.email ci-bot@users.noreply.github.com
           git checkout -B ci-log
-          cp build.log ci-build.log || true
-          git add ci-build.log || true
-          git commit -m "ci build log" || true
+          cp build.log ci-build.log
+          git add ci-build.log
+          git commit -m "ci build log"
           git push -f origin ci-log
 
+      - name: Fail
+        if: steps.build.outcome == 'failure'
+        run: exit 1
+
       - name: Rename APK
+        if: steps.build.outcome == 'success'
         run: |
           mkdir -p out
           cp app/build/outputs/apk/release/app-release.apk "out/FileKeeper-${{ github.run_number }}.apk"
 
       - name: Upload artifact
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: FileKeeper-apk
           path: out/*.apk
 
       - name: Publish latest release
-        if: github.ref == 'refs/heads/main'
+        if: steps.build.outcome == 'success' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
