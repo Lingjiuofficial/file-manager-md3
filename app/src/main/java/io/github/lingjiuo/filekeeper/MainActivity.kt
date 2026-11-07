@@ -140,8 +140,11 @@ fun App() {
             else -> state.section = Section.FILES
         }
     }
-    BackHandler(enabled = viewer == null && state.selection.isEmpty() && state.section == Section.FILES) {
-        val parent = state.currentDir.parentFile
-        if (parent != null && state.currentDir.absolutePath != "/") state.navigate(parent)
+    val parentDir = state.currentDir.parentFile
+    BackHandler(
+        enabled = viewer == null && state.selection.isEmpty() && state.section == Section.FILES &&
+            parentDir != null && state.currentDir.absolutePath != "/"
+    ) {
+        state.navigate(parentDir ?: state.currentDir)
     }
 }

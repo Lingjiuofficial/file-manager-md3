@@ -64,10 +64,10 @@ app/src/main/java/io/github/lingjiuo/filekeeper/
 
 ## 路线图
 
-- [ ] 双窗格对照
+- [x] 双窗格对照
 - [ ] Root 分区浏览
 - [ ] FTP 客户端 / 服务端
-- [ ] PDF 浏览器
+- [x] PDF 浏览器
 - [ ] ZIP 加密与分卷
 - [ ] 应用管理（备份 / 卸载）
 
