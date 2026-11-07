@@ -1,0 +1,9 @@
+-keep class io.github.lingjiuo.filekeeper.** { *; }
+-keep class com.github.junrar.** { *; }
+-keep class net.lingala.zip4j.** { *; }
+-keep class org.apache.commons.compress.** { *; }
+-dontwarn org.slf4j.**
+-dontwarn org.apache.commons.**
+-dontwarn net.lingala.zip4j.**
+-dontwarn com.github.junrar.**
+-dontwarn org.tukaani.xz.**
