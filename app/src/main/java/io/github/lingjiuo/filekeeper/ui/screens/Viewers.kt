@@ -270,11 +270,10 @@ private fun ApkInfo(file: File) {
             }
         }
         Spacer(Modifier.height(18.dp))
-        io.github.lingjiuo.filekeeper.ui.miui.MiuiButton(
-            text = "安装",
+        top.yukonga.miuix.kmp.basic.Button(
             onClick = { installApk(context, file) },
             modifier = Modifier.fillMaxWidth()
-        )
+        ) { Text("安装") }
     }
 }
 

@@ -1,6 +1,6 @@
 # 文件管家 · FileKeeper
 
-一个用 **Kotlin + Jetpack Compose** 写的 Android 文件管理器，界面按 **MIUI / HyperOS** 设计语言重做：白色圆角卡片、大标题、橙色强调色、底部类 iOS 悬浮胶囊栏，支持**动态取色**（Android 12+ 从壁纸提取强调色）。
+一个用 **Kotlin + Jetpack Compose** 写的 Android 文件管理器，界面使用 **MIUIX**（`top.yukonga.miuix.kmp`，小米 HyperOS 设计语言的 Compose 实现）构建，和 InstallerX Revived 的 MIUIX 风格同源；底部是 MIUIX 悬浮导航栏，支持**动态取色**（壁纸取色）。
 
 > 由 `file-manager-md3` 全面重构而来：不再是「把 6000 行塞进 workflow」的单文件工程，改为正常的 Android 项目结构，方便后续维护。
 
