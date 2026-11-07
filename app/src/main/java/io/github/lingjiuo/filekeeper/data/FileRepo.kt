@@ -72,8 +72,13 @@ object FileRepo {
         onProgress: (index: Int, total: Int, name: String, fraction: Float) -> Unit
     ): List<File> = withContext(Dispatchers.IO) {
         val created = mutableListOf<File>()
+        val destPath = destDir.canonicalPath
         sources.forEachIndexed { index, src ->
             coroutineContext.ensureActive()
+            val srcPath = src.canonicalPath
+            if (src.isDirectory && (destPath == srcPath || destPath.startsWith(srcPath + File.separator))) {
+                throw IllegalStateException("不能把文件夹复制到它自己里面")
+            }
             val target = if (src.isDirectory) resolveDir(destDir, src.name) else Fmt.uniqueFile(destDir, src.name)
             copyRecursive(src, target) { fraction -> onProgress(index + 1, sources.size, src.name, fraction) }
             created += target
@@ -134,6 +139,10 @@ object FileRepo {
             if (src.parentFile?.canonicalPath == destDir.canonicalPath) {
                 moved += src
                 return@forEachIndexed
+            }
+            val srcPath = src.canonicalPath
+            if (src.isDirectory && destDir.canonicalPath.startsWith(srcPath + File.separator)) {
+                throw IllegalStateException("不能把文件夹移动到它自己里面")
             }
             val direct = File(destDir, src.name)
             if (!direct.exists() && src.renameTo(direct)) {
