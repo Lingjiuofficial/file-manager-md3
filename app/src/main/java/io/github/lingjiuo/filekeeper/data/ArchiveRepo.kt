@@ -5,7 +5,9 @@ import io.github.lingjiuo.filekeeper.util.Fmt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
+import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
@@ -240,6 +242,50 @@ object ArchiveRepo {
             coroutineContext.ensureActive()
             if (s.isDirectory) zip.addFolder(s, params) else zip.addFile(s, params)
             onProgress(i + 1, sources.size, s.name)
+        }
+    }
+
+    /** 用 7-Zip 容器打包（commons-compress 的 SevenZOutputFile）。 */
+    suspend fun create7z(
+        sources: List<File>,
+        dest: File,
+        onProgress: (Int, Int, String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        dest.parentFile?.mkdirs()
+        if (dest.exists()) dest.delete()
+        var done = 0
+        SevenZOutputFile(dest).use { out ->
+            suspend fun add(f: File, base: String) {
+                coroutineContext.ensureActive()
+                if (f.isDirectory) {
+                    val entry = SevenZArchiveEntry().apply {
+                        name = base
+                        isDirectory = true
+                    }
+                    out.putArchiveEntry(entry)
+                    out.closeArchiveEntry()
+                    f.listFiles()?.forEach { add(it, "$base/${it.name}") }
+                } else {
+                    val entry = SevenZArchiveEntry().apply {
+                        name = base
+                        size = f.length()
+                    }
+                    out.putArchiveEntry(entry)
+                    f.inputStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            coroutineContext.ensureActive()
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            out.write(buffer, 0, read)
+                        }
+                    }
+                    out.closeArchiveEntry()
+                }
+                done++
+                onProgress(done, sources.size, f.name)
+            }
+            sources.forEach { add(it, it.name) }
         }
     }
 

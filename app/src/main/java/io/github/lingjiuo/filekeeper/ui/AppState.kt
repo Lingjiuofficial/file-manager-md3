@@ -44,6 +44,21 @@ class AppState(context: Context) {
 
     var message by mutableStateOf<String?>(null)
 
+    var darkMode by androidx.compose.runtime.mutableIntStateOf(prefs.darkMode)
+        private set
+    var dynamicColor by mutableStateOf(prefs.dynamicColor)
+        private set
+
+    fun changeDarkMode(value: Int) {
+        darkMode = value
+        prefs.darkMode = value
+    }
+
+    fun changeDynamicColor(value: Boolean) {
+        dynamicColor = value
+        prefs.dynamicColor = value
+    }
+
     val currentDir: File get() = File(path)
     val secondDir: File get() = File(secondPath)
     val activeDir: File get() = if (dualPane && activePane == 1) secondDir else currentDir

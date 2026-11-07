@@ -63,7 +63,7 @@ fun App() {
     var permissionAsked by remember { mutableStateOf(false) }
     var showPermDialog by remember { mutableStateOf(false) }
 
-    val dark = when (state.prefs.darkMode) {
+    val dark = when (state.darkMode) {
         1 -> false
         2 -> true
         else -> isSystemInDarkTheme()
@@ -84,8 +84,8 @@ fun App() {
         }
     }
 
-    FileKeeperTheme(dark = dark) {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    FileKeeperTheme(dark = dark, dynamic = state.dynamicColor) {
+        Box(Modifier.fillMaxSize().background(io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.background)) {
             Column(Modifier.fillMaxSize().statusBarsPadding()) {
                 when (state.section) {
                     Section.FILES -> FilesScreen(state) { file -> viewer = file }
@@ -110,25 +110,24 @@ fun App() {
                 FileViewer(file) { viewer = null }
             }
             if (showPermDialog) {
-                AlertDialog(
-                    onDismissRequest = { showPermDialog = false },
-                    title = { Text("需要文件访问权限") },
-                    text = { Text("为了浏览和管理手机全部文件，请授予「所有文件访问权限」。") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            showPermDialog = false
-                            runCatching {
-                                context.startActivity(
-                                    Intent(
-                                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                        Uri.parse("package:${context.packageName}")
-                                    )
+                io.github.lingjiuo.filekeeper.ui.miui.MiuiDialog(
+                    title = "需要文件访问权限",
+                    onDismiss = { showPermDialog = false },
+                    confirmText = "去授权",
+                    onConfirm = {
+                        showPermDialog = false
+                        runCatching {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
                                 )
-                            }
-                        }) { Text("去授权") }
-                    },
-                    dismissButton = { TextButton(onClick = { showPermDialog = false }) { Text("稍后") } }
-                )
+                            )
+                        }
+                    }
+                ) {
+                    Text("为了浏览和管理手机全部文件，请授予「所有文件访问权限」。")
+                }
             }
         }
     }

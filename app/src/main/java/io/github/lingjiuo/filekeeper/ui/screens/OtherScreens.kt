@@ -1,6 +1,5 @@
 package io.github.lingjiuo.filekeeper.ui.screens
 
-import android.content.Context
 import android.os.Environment
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -19,25 +18,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.Star
-import androidx.compose.material.icons.rounded.StarBorder
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,22 +32,34 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.lingjiuo.filekeeper.data.FileRepo
 import io.github.lingjiuo.filekeeper.model.FileEntry
 import io.github.lingjiuo.filekeeper.model.Section
+import io.github.lingjiuo.filekeeper.model.ViewMode
 import io.github.lingjiuo.filekeeper.ui.AppState
 import io.github.lingjiuo.filekeeper.ui.components.LargeTitle
+import io.github.lingjiuo.filekeeper.ui.miui.MiuiButton
+import io.github.lingjiuo.filekeeper.ui.miui.MiuiCard
+import io.github.lingjiuo.filekeeper.ui.miui.MiuiChip
+import io.github.lingjiuo.filekeeper.ui.miui.MiuiDivider
+import io.github.lingjiuo.filekeeper.ui.miui.MiuiSectionTitle
+import io.github.lingjiuo.filekeeper.ui.miui.MiuiSwitch
+import io.github.lingjiuo.filekeeper.ui.theme.LocalMiui
 import io.github.lingjiuo.filekeeper.util.Fmt
 import java.io.File
 
 @Composable
 fun SearchScreen(state: AppState) {
+    val palette = LocalMiui.current
     var category by remember { mutableStateOf<String?>(null) }
     val categories = listOf("图片", "视频", "音频", "文档", "安装包", "压缩包")
+
     LaunchedEffect(state.searchQuery, category) {
         if (state.searchQuery.isBlank()) {
             state.searchResults = emptyList()
@@ -69,55 +67,87 @@ fun SearchScreen(state: AppState) {
         }
         state.searching = true
         val res = mutableListOf<File>()
-        FileRepo.search(File(state.path), state.searchQuery, category) { f -> res += f }
+        FileRepo.search(File(state.path), state.searchQuery, category) { res += it }
         state.searchResults = res
         state.searching = false
     }
 
     Column(Modifier.fillMaxSize()) {
         LargeTitle("搜索", "在 ${File(state.path).name.ifEmpty { "/" }} 下查找")
-        OutlinedTextField(
-            value = state.searchQuery,
-            onValueChange = { state.searchQuery = it },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            placeholder = { Text("文件名关键词") },
-            leadingIcon = { Icon(Icons.Rounded.Search, null) },
-            singleLine = true,
-            shape = RoundedCornerShape(18.dp),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions.Default
-        )
-        LazyRow(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(palette.card)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            item {
-                FilterChip(selected = category == null, onClick = { category = null }, label = { Text("全部") })
-            }
-            items(categories) { c ->
-                FilterChip(selected = category == c, onClick = { category = if (category == c) null else c }, label = { Text(c) })
+            Icon(
+                Icons.Rounded.Search,
+                null,
+                tint = palette.textSecondary,
+                modifier = Modifier.size(19.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.weight(1f)) {
+                if (state.searchQuery.isEmpty()) {
+                    Text("文件名关键词", color = palette.textSecondary, fontSize = 15.sp)
+                }
+                BasicTextField(
+                    value = state.searchQuery,
+                    onValueChange = { state.searchQuery = it },
+                    singleLine = true,
+                    textStyle = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(color = palette.textPrimary),
+                    cursorBrush = SolidColor(palette.accent),
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
-        if (state.searching) LinearProgressIndicator(Modifier.fillMaxWidth())
+
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            item { MiuiChip("全部", category == null) { category = null } }
+            items(categories) { c ->
+                MiuiChip(c, category == c) { category = if (category == c) null else c }
+            }
+        }
+
         LazyColumn(Modifier.weight(1f)) {
             items(state.searchResults, key = { it.absolutePath }) { f ->
                 Row(
-                    Modifier.fillMaxWidth().clickable {
-                        val parent = f.parentFile
-                        if (parent != null) {
-                            state.navigate(parent)
-                            state.section = Section.FILES
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val parent = f.parentFile
+                            if (parent != null) {
+                                state.navigate(parent)
+                                state.section = Section.FILES
+                            }
                         }
-                    }.padding(horizontal = 18.dp, vertical = 10.dp),
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Rounded.Folder, null, tint = Fmt.tintFor(f.name, false), modifier = Modifier.size(22.dp))
+                    Icon(
+                        Fmt.iconFor(f.name, false),
+                        null,
+                        tint = Fmt.tintFor(f.name, false),
+                        modifier = Modifier.size(22.dp)
+                    )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(f.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(f.parent, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        Text(f.name, fontSize = 15.sp, color = palette.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            f.parent,
+                            fontSize = 11.5.sp,
+                            color = palette.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
-                    Text(Fmt.size(f.length()), style = MaterialTheme.typography.labelMedium)
+                    Text(Fmt.size(f.length()), fontSize = 12.sp, color = palette.textSecondary)
                 }
             }
             item { Spacer(Modifier.height(110.dp)) }
@@ -127,23 +157,39 @@ fun SearchScreen(state: AppState) {
 
 @Composable
 fun FavoritesScreen(state: AppState) {
+    val palette = LocalMiui.current
     val favorites = state.prefs.favorites
     val recent = state.prefs.recent
     Column(Modifier.fillMaxSize()) {
         LargeTitle("收藏", "常用目录与最近访问")
         LazyColumn(Modifier.fillMaxSize()) {
-            item { SectionTitle("收藏") }
-            if (favorites.isEmpty()) {
-                item { Hint("在文件页长按文件夹可加入收藏") }
+            item { MiuiSectionTitle("收藏") }
+            item {
+                MiuiCard(Modifier.padding(horizontal = 16.dp), padding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)) {
+                    if (favorites.isEmpty()) {
+                        Text(
+                            "在文件页长按文件夹即可收藏",
+                            color = palette.textSecondary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                    favorites.forEachIndexed { index, path ->
+                        PathRow(File(path), onOpen = { state.navigate(File(path)) }, onRemove = {
+                            state.prefs.favorites = favorites - path
+                        })
+                        if (index != favorites.lastIndex) MiuiDivider(Modifier.padding(start = 52.dp))
+                    }
+                }
             }
-            items(favorites) { path ->
-                PathRow(File(path), onOpen = { state.navigate(File(path)) }, onRemove = {
-                    state.prefs.favorites = favorites - path
-                })
-            }
-            item { SectionTitle("最近") }
-            items(recent) { path ->
-                PathRow(File(path), onOpen = { state.navigate(File(path)) }, onRemove = null)
+            item { MiuiSectionTitle("最近") }
+            item {
+                MiuiCard(Modifier.padding(horizontal = 16.dp), padding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)) {
+                    recent.take(10).forEachIndexed { index, path ->
+                        PathRow(File(path), onOpen = { state.navigate(File(path)) }, onRemove = null)
+                        if (index != recent.take(10).lastIndex) MiuiDivider(Modifier.padding(start = 52.dp))
+                    }
+                }
             }
             item { Spacer(Modifier.height(110.dp)) }
         }
@@ -151,44 +197,46 @@ fun FavoritesScreen(state: AppState) {
 }
 
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleMedium,
-        modifier = Modifier.padding(start = 20.dp, top = 18.dp, bottom = 6.dp)
-    )
-}
-
-@Composable
-private fun Hint(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
-    )
-}
-
-@Composable
 private fun PathRow(file: File, onOpen: () -> Unit, onRemove: (() -> Unit)?) {
+    val palette = LocalMiui.current
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(Icons.Rounded.Folder, null, tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(14.dp))
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(palette.accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Rounded.Folder,
+                null,
+                tint = palette.accent,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(file.name.ifEmpty { "/" }, style = MaterialTheme.typography.bodyLarge)
-            Text(file.absolutePath, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(file.name.ifEmpty { "/" }, fontSize = 15.sp, color = palette.textPrimary)
+            Text(
+                file.absolutePath,
+                fontSize = 11.5.sp,
+                color = palette.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
         if (onRemove != null) {
-            IconButton(onClick = onRemove) { Icon(Icons.Rounded.Delete, "移除", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp)) }
+            Text("移除", fontSize = 13.sp, color = palette.danger, modifier = Modifier.clickable(onClick = onRemove))
         }
     }
 }
 
 @Composable
 fun StorageScreen(state: AppState) {
+    val palette = LocalMiui.current
     var dir by remember { mutableStateOf(File(PrefsRoot)) }
     var items by remember { mutableStateOf<List<FileEntry>>(emptyList()) }
     var scanning by remember { mutableStateOf(false) }
@@ -206,36 +254,49 @@ fun StorageScreen(state: AppState) {
 
     Column(Modifier.fillMaxSize()) {
         LargeTitle("存储", dir.absolutePath)
-        Surface(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-            shape = RoundedCornerShape(22.dp),
-            color = MaterialTheme.colorScheme.surface
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Text("${Fmt.size(used)} / ${Fmt.size(total)}", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    progress = { if (total > 0) used.toFloat() / total else 0f },
-                    modifier = Modifier.fillMaxWidth()
+        MiuiCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(Fmt.size(used), fontSize = 28.sp, fontWeight = FontWeight.Bold, color = palette.textPrimary)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "/ ${Fmt.size(total)}",
+                    fontSize = 13.sp,
+                    color = palette.textSecondary,
+                    modifier = Modifier.padding(bottom = 4.dp)
                 )
-                Spacer(Modifier.height(6.dp))
-                Text("剩余 ${Fmt.size(free)}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Spacer(Modifier.height(10.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(palette.divider)
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(if (total > 0) (used.toFloat() / total).coerceIn(0f, 1f) else 0f)
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(palette.accent)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text("剩余 ${Fmt.size(free)}", fontSize = 12.sp, color = palette.textSecondary)
         }
+
         if (dir.absolutePath != PrefsRoot) {
-            TextButton(onClick = { dir = dir.parentFile ?: dir }, modifier = Modifier.padding(start = 10.dp)) {
-                Icon(Icons.Rounded.ArrowBack, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("上一级")
-            }
+            MiuiButton("上一级", onClick = { dir = dir.parentFile ?: dir }, filled = false,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth())
         }
-        if (scanning) LinearProgressIndicator(Modifier.fillMaxWidth())
+
         LazyColumn(Modifier.fillMaxSize()) {
             items(items, key = { it.file.absolutePath }) { item ->
                 Column(
-                    Modifier.fillMaxWidth().clickable {
-                        if (item.isDir) dir = item.file else state.navigate(item.file.parentFile ?: dir)
-                    }.padding(horizontal = 18.dp, vertical = 10.dp)
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { if (item.isDir) dir = item.file }
+                        .padding(horizontal = 20.dp, vertical = 10.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
@@ -245,20 +306,26 @@ fun StorageScreen(state: AppState) {
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(Modifier.width(10.dp))
-                        Text(item.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(Fmt.size(item.size), style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            item.name,
+                            Modifier.weight(1f),
+                            fontSize = 15.sp,
+                            color = palette.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(Fmt.size(item.size), fontSize = 12.5.sp, color = palette.textSecondary)
                     }
                     Spacer(Modifier.height(6.dp))
                     Box(
-                        Modifier.fillMaxWidth().height(6.dp).background(
-                            MaterialTheme.colorScheme.surfaceVariant,
-                            RoundedCornerShape(3.dp)
-                        )
+                        Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(palette.divider)
                     ) {
                         Box(
-                            Modifier.fillMaxWidth((item.size.toFloat() / maxSize).coerceIn(0.02f, 1f))
+                            Modifier
+                                .fillMaxWidth((item.size.toFloat() / maxSize).coerceIn(0.02f, 1f))
                                 .height(6.dp)
-                                .background(Fmt.tintFor(item.name, item.isDir), RoundedCornerShape(3.dp))
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Fmt.tintFor(item.name, item.isDir))
                         )
                     }
                 }
@@ -272,78 +339,77 @@ private val PrefsRoot = Environment.getExternalStorageDirectory()?.absolutePath 
 
 @Composable
 fun SettingsScreen(state: AppState, onChange: () -> Unit) {
+    val palette = LocalMiui.current
+    
     Column(Modifier.fillMaxSize()) {
         LargeTitle("设置", "文件管家 1.0")
         LazyColumn(Modifier.fillMaxSize()) {
-            item { SettingHeader("外观") }
+            item { MiuiSectionTitle("外观") }
             item {
-                SettingRow("主题") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("跟随系统" to 0, "浅色" to 1, "深色" to 2).forEach { (label, v) ->
-                            FilterChip(
-                                selected = state.prefs.darkMode == v,
-                                onClick = { state.prefs.darkMode = v; onChange() },
-                                label = { Text(label) }
-                            )
+                MiuiCard(Modifier.padding(horizontal = 16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 6.dp)) {
+                        Text("主题", Modifier.weight(1f), fontSize = 15.sp, color = palette.textPrimary)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            MiuiChip("系统", state.darkMode == 0) { state.changeDarkMode(0) }
+                            MiuiChip("浅色", state.darkMode == 1) { state.changeDarkMode(1) }
+                            MiuiChip("深色", state.darkMode == 2) { state.changeDarkMode(2) }
+                        }
+                    }
+                    MiuiDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text("跟随壁纸取色", fontSize = 15.sp, color = palette.textPrimary)
+                            Text("Android 12+ 从壁纸提取强调色", fontSize = 11.5.sp, color = palette.textSecondary)
+                        }
+                        MiuiSwitch(
+                            checked = state.dynamicColor,
+                            onChange = { state.changeDynamicColor(it) }
+                        )
+                    }
+                }
+            }
+            item { MiuiSectionTitle("浏览") }
+            item {
+                MiuiCard(Modifier.padding(horizontal = 16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text("显示隐藏文件", fontSize = 15.sp, color = palette.textPrimary)
+                            Text("以 . 开头的文件和目录", fontSize = 11.5.sp, color = palette.textSecondary)
+                        }
+                        MiuiSwitch(
+                            checked = state.showHidden,
+                            onChange = {
+                                state.showHidden = it; state.applyPrefs(); onChange()
+                            }
+                        )
+                    }
+                    MiuiDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
+                        Text("默认视图", Modifier.weight(1f), fontSize = 15.sp, color = palette.textPrimary)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            MiuiChip("列表", state.viewMode == ViewMode.LIST) {
+                                state.viewMode = ViewMode.LIST; state.applyPrefs(); onChange()
+                            }
+                            MiuiChip("网格", state.viewMode == ViewMode.GRID) {
+                                state.viewMode = ViewMode.GRID; state.applyPrefs(); onChange()
+                            }
                         }
                     }
                 }
             }
-            item { SettingHeader("浏览") }
+            item { MiuiSectionTitle("关于") }
             item {
-                SettingRow("显示隐藏文件") {
-                    androidx.compose.material3.Switch(
-                        checked = state.showHidden,
-                        onCheckedChange = { state.showHidden = it; state.applyPrefs(); onChange() }
+                MiuiCard(Modifier.padding(horizontal = 16.dp)) {
+                    Text("文件管家", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = palette.textPrimary)
+                    Text(
+                        "Kotlin + Jetpack Compose · GPL-3.0\n支持 ZIP / 7Z / RAR / TAR、PDF、APK、文本、图片与视频。",
+                        fontSize = 12.sp,
+                        color = palette.textSecondary,
+                        modifier = Modifier.padding(top = 6.dp)
                     )
-                }
-            }
-            item {
-                SettingRow("默认视图") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(
-                            selected = state.viewMode == io.github.lingjiuo.filekeeper.model.ViewMode.LIST,
-                            onClick = { state.viewMode = io.github.lingjiuo.filekeeper.model.ViewMode.LIST; state.applyPrefs(); onChange() },
-                            label = { Text("列表") }
-                        )
-                        FilterChip(
-                            selected = state.viewMode == io.github.lingjiuo.filekeeper.model.ViewMode.GRID,
-                            onClick = { state.viewMode = io.github.lingjiuo.filekeeper.model.ViewMode.GRID; state.applyPrefs(); onChange() },
-                            label = { Text("网格") }
-                        )
-                    }
-                }
-            }
-            item { SettingHeader("关于") }
-            item {
-                Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-                    Text("文件管家 · Kotlin + Jetpack Compose", style = MaterialTheme.typography.bodyMedium)
-                    Text("支持 ZIP / 7Z / RAR / TAR 浏览与解压，APK / 文本 / 图片 / 视频查看。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             item { Spacer(Modifier.height(110.dp)) }
         }
-    }
-}
-
-@Composable
-private fun SettingHeader(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.primary,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(start = 22.dp, top = 18.dp, bottom = 4.dp)
-    )
-}
-
-@Composable
-private fun SettingRow(title: String, content: @Composable () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-        content()
     }
 }

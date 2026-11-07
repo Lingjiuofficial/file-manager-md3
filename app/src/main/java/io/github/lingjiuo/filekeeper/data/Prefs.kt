@@ -27,6 +27,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("asc", true)
         set(v) = sp.edit().putBoolean("asc", v).apply()
 
+    var dynamicColor: Boolean
+        get() = sp.getBoolean("dynamic", true)
+        set(v) = sp.edit().putBoolean("dynamic", v).apply()
+
     var showHidden: Boolean
         get() = sp.getBoolean("hidden", false)
         set(v) = sp.edit().putBoolean("hidden", v).apply()

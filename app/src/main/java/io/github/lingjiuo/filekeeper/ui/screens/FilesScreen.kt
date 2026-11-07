@@ -23,6 +23,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBack
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.FolderZip
+import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreVert
@@ -194,15 +197,22 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
         }
     }
 
-    fun compress(files: List<File>) {
+    fun compress(files: List<File>, sevenZip: Boolean = false) {
         if (files.isEmpty()) return
-        val name = if (files.size == 1) files[0].name.substringBeforeLast('.') + ".zip" else "压缩包.zip"
+        val ext = if (sevenZip) ".7z" else ".zip"
+        val name = if (files.size == 1) files[0].name.substringBeforeLast('.') + ext else "压缩包$ext"
         val dest = File(state.activeDir, name)
         scope.launch {
             progress = OpProgress("正在压缩", 0, files.size, "")
             try {
-                ArchiveRepo.createZip(files, dest) { i, t, n ->
-                    progress = OpProgress("正在压缩", i - 1, t, n)
+                if (sevenZip) {
+                    ArchiveRepo.create7z(files, dest) { i, t, n ->
+                        progress = OpProgress("正在压缩", i - 1, t, n)
+                    }
+                } else {
+                    ArchiveRepo.createZip(files, dest) { i, t, n ->
+                        progress = OpProgress("正在压缩", i - 1, t, n)
+                    }
                 }
                 state.message = "已创建 ${dest.name}"
             } catch (e: Exception) {
@@ -243,7 +253,12 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                     RoundIconButton(Icons.Rounded.Sort, "排序", onClick = { sortOpen = true })
                     Spacer(Modifier.width(6.dp))
                     RoundIconButton(Icons.Rounded.MoreVert, "更多", onClick = { moreOpen = true })
-                    DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                    DropdownMenu(
+                        expanded = moreOpen,
+                        onDismissRequest = { moreOpen = false },
+                        containerColor = io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.card,
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
                         DropdownMenuItem(text = { Text("新建文件夹") }, leadingIcon = { Icon(Icons.Rounded.CreateNewFolder, null) },
                             onClick = { moreOpen = false; showNewDir = true })
                         DropdownMenuItem(text = { Text("新建文件") }, leadingIcon = { Icon(Icons.Rounded.NoteAdd, null) },
@@ -268,7 +283,12 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                         DropdownMenuItem(text = { Text("刷新") }, leadingIcon = { Icon(Icons.Rounded.Refresh, null) },
                             onClick = { moreOpen = false; refresh() })
                     }
-                    DropdownMenu(expanded = sortOpen, onDismissRequest = { sortOpen = false }) {
+                    DropdownMenu(
+                        expanded = sortOpen,
+                        onDismissRequest = { sortOpen = false },
+                        containerColor = io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.card,
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
                         SortMode.entries.forEach { mode ->
                             val label = when (mode) {
                                 SortMode.NAME -> "按名称"
@@ -523,7 +543,20 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
     menuTarget?.let { target ->
         val isMulti = state.selection.size > 1
         val targets = if (isMulti) state.selectedFiles() else listOf(target)
-        ModalBottomSheet(onDismissRequest = { menuTarget = null }) {
+        ModalBottomSheet(
+            onDismissRequest = { menuTarget = null },
+            containerColor = io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.card,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            dragHandle = {
+                Box(
+                    Modifier
+                        .padding(top = 10.dp, bottom = 4.dp)
+                        .size(38.dp, 4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.divider)
+                )
+            }
+        ) {
             Column(Modifier.padding(bottom = 24.dp)) {
                 Text(
                     if (isMulti) "已选择 ${targets.size} 项" else target.name,
@@ -536,7 +569,8 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                 SheetAction("剪切", Icons.Rounded.ContentCut) { menuTarget = null; copySelection(true) }
                 SheetAction("重命名", Icons.Rounded.Description) { menuTarget = null; if (!isMulti) renameTarget = target }
                 SheetAction("批量重命名", Icons.Rounded.SelectAll) { menuTarget = null; batchRename = true }
-                SheetAction("压缩为 ZIP", Icons.Rounded.FolderZip) { menuTarget = null; compress(targets) }
+                SheetAction("压缩为 ZIP", Icons.Rounded.FolderZip) { menuTarget = null; compress(targets, false) }
+                SheetAction("压缩为 7Z", Icons.Rounded.Archive) { menuTarget = null; compress(targets, true) }
                 if (!isMulti && Fmt.isArchive(target.name) && !Fmt.isApk(target.name)) {
                     SheetAction("解压到当前目录", Icons.Rounded.FolderZip) { menuTarget = null; extract(target) }
                 }
@@ -571,12 +605,13 @@ private fun SelectionBar(
     onMore: () -> Unit,
     onClose: () -> Unit
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 6.dp,
-        shadowElevation = 12.dp
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.card)
+            .shadow(12.dp, RoundedCornerShape(24.dp))
     ) {
         Row(
             Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -705,19 +740,17 @@ private fun BatchRenameDialog(count: Int, onDismiss: () -> Unit, onConfirm: (Str
         title = { Text("批量重命名 $count 项") },
         text = {
             Column {
-                androidx.compose.material3.OutlinedTextField(
-                    value = prefix,
-                    onValueChange = { prefix = it },
-                    label = { Text("前缀") },
-                    singleLine = true,
+                io.github.lingjiuo.filekeeper.ui.components.MiuiTextField(
+                    value = androidx.compose.ui.text.input.TextFieldValue(prefix),
+                    onValueChange = { prefix = it.text },
+                    label = "前缀",
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
-                androidx.compose.material3.OutlinedTextField(
-                    value = start,
-                    onValueChange = { start = it.filter { c -> c.isDigit() } },
-                    label = { Text("起始编号") },
-                    singleLine = true,
+                io.github.lingjiuo.filekeeper.ui.components.MiuiTextField(
+                    value = androidx.compose.ui.text.input.TextFieldValue(start),
+                    onValueChange = { start = it.text.filter { c -> c.isDigit() } },
+                    label = "起始编号",
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))

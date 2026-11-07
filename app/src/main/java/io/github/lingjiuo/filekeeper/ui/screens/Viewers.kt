@@ -206,12 +206,25 @@ private fun TextViewer(file: File) {
         if (!loaded) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("读取中…") }
         } else {
-            OutlinedTextField(
+            androidx.compose.foundation.text.BasicTextField(
                 value = text,
                 onValueChange = { text = it; dirty = true },
-                modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
-                keyboardActions = KeyboardActions.Default
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .background(
+                        io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.cardAlt,
+                        RoundedCornerShape(16.dp)
+                    )
+                    .padding(12.dp),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    color = io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.textPrimary
+                ),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(
+                    io.github.lingjiuo.filekeeper.ui.theme.LocalMiui.current.accent
+                )
             )
         }
     }
@@ -257,14 +270,11 @@ private fun ApkInfo(file: File) {
             }
         }
         Spacer(Modifier.height(18.dp))
-        Button(
+        io.github.lingjiuo.filekeeper.ui.miui.MiuiButton(
+            text = "安装",
             onClick = { installApk(context, file) },
             modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(Icons.Rounded.Android, null)
-            Spacer(Modifier.width(8.dp))
-            Text("安装")
-        }
+        )
     }
 }
 
