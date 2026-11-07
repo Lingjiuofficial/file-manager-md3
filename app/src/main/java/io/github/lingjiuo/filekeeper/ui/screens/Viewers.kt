@@ -1,6 +1,9 @@
 package io.github.lingjiuo.filekeeper.ui.screens
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -18,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -48,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -93,6 +99,7 @@ fun FileViewer(file: File, onClose: () -> Unit) {
                     Fmt.isImage(file.name) -> ImageViewer(file)
                     Fmt.isVideo(file.name) || Fmt.isAudio(file.name) -> MediaPlayer(file)
                     Fmt.isApk(file.name) -> ApkInfo(file)
+                    Fmt.ext(file.name) == "pdf" -> PdfViewer(file)
                     Fmt.isText(file.name) || file.name.lowercase().endsWith(".json") -> TextViewer(file)
                     Fmt.isArchive(file.name) -> ArchiveViewer(file)
                     else -> HexViewer(file)
@@ -258,6 +265,60 @@ private fun ApkInfo(file: File) {
             Spacer(Modifier.width(8.dp))
             Text("安装")
         }
+    }
+}
+
+@Composable
+private fun PdfViewer(file: File) {
+    var pageCount by remember { mutableIntStateOf(0) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(file) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                    PdfRenderer(pfd).use { renderer -> pageCount = renderer.pageCount }
+                }
+            }.onFailure { error = it.message }
+        }
+    }
+    if (error != null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("无法打开 PDF：${error}")
+        }
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(pageCount) { index -> PdfPage(file, index) }
+    }
+}
+
+@Composable
+private fun PdfPage(file: File, index: Int) {
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(null, file, index) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                    PdfRenderer(pfd).use { renderer ->
+                        renderer.openPage(index).use { page ->
+                            val width = context.resources.displayMetrics.widthPixels
+                            val height = (width.toFloat() * page.height / page.width).toInt().coerceAtLeast(1)
+                            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                            bmp.eraseColor(android.graphics.Color.WHITE)
+                            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            bmp
+                        }
+                    }
+                }
+            }.getOrNull()
+        }
+    }
+    bitmap?.let {
+        Image(
+            bitmap = it.asImageBitmap(),
+            contentDescription = "第 ${index + 1} 页",
+            modifier = Modifier.fillMaxWidth().padding(6.dp)
+        )
     }
 }
 

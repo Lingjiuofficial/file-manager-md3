@@ -44,6 +44,7 @@ import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Sort
+import androidx.compose.material.icons.rounded.VerticalSplit
 import androidx.compose.material.icons.rounded.ViewList
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -109,6 +110,12 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
     var sortOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     var batchRename by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.secondPath, state.dualPane, state.sort, state.ascending, state.showHidden, reload) {
+        if (state.dualPane) {
+            state.secondEntries = FileRepo.list(File(state.secondPath), state.showHidden, state.sort, state.ascending)
+        }
+    }
 
     LaunchedEffect(state.path, state.sort, state.ascending, state.showHidden, reload) {
         state.loading = true
@@ -249,6 +256,13 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                         DropdownMenuItem(text = { Text(if (state.viewMode == ViewMode.LIST) "网格视图" else "列表视图") },
                             leadingIcon = { Icon(if (state.viewMode == ViewMode.LIST) Icons.Rounded.GridView else Icons.Rounded.ViewList, null) },
                             onClick = { moreOpen = false; state.viewMode = if (state.viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST; state.applyPrefs() })
+                        DropdownMenuItem(text = { Text(if (state.dualPane) "关闭双窗格" else "开启双窗格") },
+                            leadingIcon = { Icon(Icons.Rounded.VerticalSplit, null) },
+                            onClick = {
+                                moreOpen = false
+                                state.dualPane = !state.dualPane
+                                if (state.dualPane) state.secondPath = state.path
+                            })
                         DropdownMenuItem(text = { Text("新建标签页") }, leadingIcon = { Icon(Icons.Rounded.Add, null) },
                             onClick = { moreOpen = false; state.addTab() })
                         DropdownMenuItem(text = { Text("刷新") }, leadingIcon = { Icon(Icons.Rounded.Refresh, null) },
@@ -339,7 +353,23 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
             }
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Column(Modifier.weight(1f).fillMaxWidth()) {
+            if (state.dualPane) {
+                SecondPane(
+                    path = state.secondPath,
+                    entries = state.secondEntries,
+                    selection = state.selection,
+                    active = state.activePane == 1,
+                    onActivate = { state.activePane = 1 },
+                    onClick = { entry ->
+                        state.activePane = 1
+                        if (entry.isDir) state.navigateSecond(entry.file) else onOpen(entry.file)
+                    },
+                    onLongClick = { entry -> state.toggleSelect(entry.file); menuTarget = entry.file }
+                )
+                HorizontalDivider(Modifier.padding(vertical = 3.dp))
+            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
                 state.loading -> LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
                 state.entries.isEmpty() -> EmptyDir(Modifier.align(Alignment.Center))
@@ -353,6 +383,7 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                             entry = entry,
                             selected = state.selection.contains(entry.file.absolutePath),
                             onClick = {
+                                state.activePane = 0
                                 if (state.selection.isNotEmpty()) {
                                     state.toggleSelect(entry.file)
                                 } else if (entry.isDir) {
@@ -374,6 +405,7 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                             entry = entry,
                             selected = state.selection.contains(entry.file.absolutePath),
                             onClick = {
+                                state.activePane = 0
                                 if (state.selection.isNotEmpty()) {
                                     state.toggleSelect(entry.file)
                                 } else if (entry.isDir) {
@@ -390,6 +422,7 @@ fun FilesScreen(state: AppState, onOpen: (File) -> Unit) {
                     }
                     item { Spacer(Modifier.height(110.dp)) }
                 }
+            }
             }
         }
 
@@ -709,5 +742,54 @@ private fun shareFile(context: android.content.Context, file: File) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "分享"))
+    }
+}
+
+
+@Composable
+private fun SecondPane(
+    path: String,
+    entries: List<FileEntry>,
+    selection: Set<String>,
+    active: Boolean,
+    onActivate: () -> Unit,
+    onClick: (FileEntry) -> Unit,
+    onLongClick: (FileEntry) -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(
+                if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.05f)
+                else MaterialTheme.colorScheme.background
+            )
+    ) {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onActivate).padding(horizontal = 18.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                path,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onActivate) {
+                Icon(Icons.Rounded.Check, "使用此窗格", modifier = Modifier.size(16.dp),
+                    tint = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(entries, key = { it.file.absolutePath }) { entry ->
+                FileRow(
+                    entry = entry,
+                    selected = selection.contains(entry.file.absolutePath),
+                    onClick = { onClick(entry) },
+                    onLongClick = { onLongClick(entry) }
+                )
+            }
+        }
     }
 }
